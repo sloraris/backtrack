@@ -57,6 +57,33 @@ def _parse_time(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+_GO_SETUID, _GO_SETGID, _GO_STICKY = 1 << 23, 1 << 22, 1 << 20
+
+
+def go_mode_to_unix(mode: int) -> int:
+    """restic stores Go os.FileMode: permission bits are the low 9, setuid/setgid/sticky live in high bits."""
+    out = mode & 0o777
+    if mode & _GO_SETUID:
+        out |= 0o4000
+    if mode & _GO_SETGID:
+        out |= 0o2000
+    if mode & _GO_STICKY:
+        out |= 0o1000
+    return out
+
+
+def apply_node_metadata(path: Path, node: dict) -> None:
+    try:
+        os.chown(path, int(node.get("uid", -1)), int(node.get("gid", -1)))
+    except PermissionError:
+        pass  # not root (tests on a laptop): owners can't be set, modes still can
+    if "mode" in node:
+        os.chmod(path, go_mode_to_unix(int(node["mode"])))
+    if node.get("mtime"):
+        t = _parse_time(node["mtime"]).timestamp()
+        os.utime(path, (t, t))
+
+
 class Restic:
     def __init__(self, repository: str, password: str, binary: str = "restic", retry_lock: str = "2h",
                  cache_dir: str | None = None):
@@ -149,6 +176,29 @@ class Restic:
         if len(snapshot.paths) != 1:
             raise ResticError(f"snapshot {snapshot.short_id} has {len(snapshot.paths)} paths, expected 1")
         self.run("restore", f"{snapshot.id}:{snapshot.paths[0]}", "--target", str(target))
+        # `id:path --target dir` restores the folder's contents but not the folder's own owner and mode,
+        # so apply them from the snapshot (a stack folder owned by uid 1000 must come back that way).
+        node = self.root_node(snapshot)
+        if node:
+            apply_node_metadata(target, node)
+
+    def root_node(self, snapshot: Snapshot) -> dict | None:
+        """The snapshot's metadata for its backed-up folder itself (`restic ls` prints it first)."""
+        root = snapshot.paths[0]
+        cmd = [self.binary, "ls", "--json", snapshot.id, root]
+        with subprocess.Popen(cmd, env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              text=True) as proc:
+            try:
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    try:
+                        node = json.loads(line)
+                    except ValueError:
+                        continue
+                    if node.get("struct_type") == "node" and node.get("path") == root:
+                        return node
+            finally:
+                proc.kill()
+        return None
 
     def forget(self, host: str, keep: dict[str, int]) -> None:
         args = ["forget", "--host", host, "--group-by", "host"]

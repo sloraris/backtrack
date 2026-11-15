@@ -243,3 +243,20 @@ def test_forget_stack(lab):
     backed_up(lab)
     assert lab.agent.forget_stack("app", lab.job()) == {"forgotten": 1}
     assert lab.restic.snapshots("app") == []
+
+
+def test_mode_of_restored_root_folder(lab):
+    d, _ = backed_up(lab)
+    os.chmod(d, 0o750)
+    lab.agent.backup("app", lab.job())
+    lab.agent.restore("app", lab.job())
+    assert d.stat().st_mode & 0o7777 == 0o750
+
+
+def test_auto_restore_root_folder_mode(lab):
+    d, _ = backed_up(lab)
+    os.chmod(d, 0o710)
+    lab.agent.backup("app", lab.job())
+    shutil.rmtree(d)
+    assert lab.agent.auto_restore("app", lab.job()) == 0
+    assert d.stat().st_mode & 0o7777 == 0o710

@@ -149,3 +149,10 @@ def test_signing():
     old = sign("k" * 32, "GET", "/v1/status", now=clock[0] - 61)
     assert not v.verify("GET", "/v1/status", old, b""), "expired"
     assert not Verifier("").verify("GET", "/v1/status", sign("", "GET", "/v1/status"), b"")
+
+
+def test_go_mode_to_unix():
+    from backtrack.restic import go_mode_to_unix
+    assert go_mode_to_unix(2147484136) == 0o750  # dir bit + 0750, as restic prints it
+    assert go_mode_to_unix((1 << 31) | (1 << 22) | 0o775) == 0o2775  # setgid dir
+    assert go_mode_to_unix((1 << 20) | 0o777) == 0o1777  # sticky

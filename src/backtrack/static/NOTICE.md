@@ -1,0 +1,3 @@
+- `bundle.css`, `tokens.css` and the `orbit` theme are from the Orbit design system by sloraris.
+- IBM Plex Sans and IBM Plex Mono (`fonts/`): SIL Open Font License 1.1, © IBM Corp.
+- Icons in `ui.py`: Lucide 1.52.0, ISC licence, © Lucide Icons and Contributors.

@@ -1,0 +1,18 @@
+# Labels on a stack you want backed up. Put them on any one service (or all, with the same values).
+services:
+  db:
+    image: postgres:17.6
+    volumes:
+      - /opt/appdata/myapp/db:/var/lib/postgresql/data
+    labels:
+      backtrack.mode: stop                         # stop | live
+      # backtrack.path: /srv/myapp                 # default: /opt/appdata/<project>
+      # backtrack.keep: daily=3,weekly=2,monthly=0 # default: KEEP
+      backtrack.hook.pre-stop: ${SILENCE_URL}      # POSTed before the stop, e.g. to silence an alert
+      backtrack.hook.post-start: ${UNSILENCE_URL}
+      # backtrack.post-restore: bash /srv/myapp/setup.sh   # runs on the host after a restore
+
+# /opt/appdata/myapp/.backupignore (restic exclude syntax). Literal paths listed here are kept
+# in place on a restore instead of being left in myapp.pre-restore.
+#   cache/
+#   *.log

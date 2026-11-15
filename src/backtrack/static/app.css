@@ -1,0 +1,2 @@
+/* Backtrack page CSS: content only, no spacing or sizes (those come from Orbit's primitives). */
+.bt-log { white-space: pre-wrap; overflow-wrap: anywhere; }

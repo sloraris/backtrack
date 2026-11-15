@@ -1,0 +1,51 @@
+# The hub: the same image as every agent, with HUB=true and the UI/API secrets.
+# It still backs up its own host's stacks like any agent.
+name: backtrack
+services:
+  agent:
+    image: ghcr.io/sloraris/backtrack:0.1.0
+    container_name: backtrack
+    restart: unless-stopped
+    stop_grace_period: 10m
+    environment:
+      MACHINE: echo
+      AGENT_URL: https://backup-echo.example.com
+      TZ: America/Boise
+      HUB: "true"
+      THEME: default                    # or orbit
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD}
+      CLUSTER_KEY: ${CLUSTER_KEY}
+      UI_PASSWORD: ${UI_PASSWORD}       # admin sign-in for the web UI
+      READ_TOKEN: ${READ_TOKEN}         # status, stacks, snapshots, jobs (give this to dashboards)
+      WRITE_TOKEN: ${WRITE_TOKEN}       # also backup and restore (scripts)
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+      HEARTBEAT_URL: ${HEARTBEAT_URL}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/appdata:/opt/appdata
+      - /opt/cache/backtrack:/opt/cache/backtrack
+      - nas:/share
+    labels:
+      - traefik.enable=true
+      # the hub UI and public API
+      - traefik.http.routers.backtrack.rule=Host(`backtrack.example.com`)
+      - traefik.http.routers.backtrack.service=backtrack
+      - traefik.http.services.backtrack.loadbalancer.server.port=8080
+      # this host's agent API, which the hub calls like any other agent's
+      - traefik.http.routers.backup-echo.rule=Host(`backup-echo.example.com`)
+      - traefik.http.routers.backup-echo.service=backtrack
+      - traefik.docker.network=traefik
+    networks:
+      - traefik
+
+volumes:
+  nas:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=192.0.2.10,nfsvers=4.1,hard,timeo=600,retrans=3
+      device: ":/volume/backups"
+
+networks:
+  traefik:
+    external: true

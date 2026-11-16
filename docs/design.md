@@ -4,7 +4,7 @@ Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one
 write to one shared restic repo. One agent can also run the hub: a web UI and API for the whole fleet. Agents
 never depend on the hub, the management plane (Komodo, Portainer, ...) or each other to back up and restore.
 
-Status: **v2, approved by Parker (2026-11-15); implemented in v0.1.0**. Decisions are recorded in [Decisions](#decisions).
+Status: **v2, approved by Parker (2026-11-15); implemented in v0.1.0, fixed after a real-host test in v0.1.1**. Decisions are recorded in [Decisions](#decisions).
 
 ## Project
 
@@ -295,7 +295,7 @@ Tether gets the read token and observes `/api/v1/status` and `/api/v1/stacks`.
 name: backtrack
 services:
   agent:
-    image: ghcr.io/sloraris/backtrack:0.1.0
+    image: ghcr.io/sloraris/backtrack:0.1.1
     container_name: backtrack
     restart: unless-stopped
     environment:

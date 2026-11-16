@@ -28,7 +28,7 @@ def test_env_locks_and_ui_fills_gaps(tmp_path):
     again = Config.load(base_env(tmp_path, BACKUP_SCHEDULE="03:30"))
     assert again.get("KEEP") == "daily=3" and again.get("BACKUP_SCHEDULE") == "03:30"
     sources = {s["key"]: s["source"] for s in again.settings()}
-    assert sources["KEEP"] == "saved" and sources["BACKUP_SCHEDULE"] == "env" and sources["THEME"] == "default"
+    assert sources["KEEP"] == "saved" and sources["BACKUP_SCHEDULE"] == "env" and sources["MAINTENANCE"] == "default"
 
 
 def test_settings_validation(tmp_path):

@@ -24,7 +24,7 @@ from backtrack.stacks import NAME_RE
 log = logging.getLogger("backtrack")
 SESSION_TTL = 12 * 3600
 MAX_BODY = 64 * 1024
-STATIC = {"tokens.css", "plain.css", "bundle.css", "app.css", "app.js", "mark.svg"}
+STATIC = {"style.css", "app.js", "mark.svg"}
 
 
 class ApiError(Exception):
@@ -283,32 +283,29 @@ def make_handler(service, hub: Hub | None):
             base = resources.files("backtrack") / "static"
             if name in STATIC:
                 f = base / name
-            elif re.fullmatch(r"fonts/[a-z0-9-]+\.woff2", name):
-                f = base / name
             else:
                 raise ApiError(404, "not found")
             try:
                 data = f.read_bytes()
             except FileNotFoundError as e:
                 raise ApiError(404, "not found") from e
-            ctype = mimetypes.guess_type(name)[0] or ("font/woff2" if name.endswith(".woff2") else "text/plain")
+            ctype = mimetypes.guess_type(name)[0] or "text/plain"
             self._send(200, data, ctype, {"Cache-Control": "public, max-age=86400"})
 
         # -- UI ---------------------------------------------------------------------------------------------
         def _ui(self, method: str, path: str, query: dict, body: bytes) -> None:
-            theme = cfg.get("THEME")
             if path == "/login":
                 if method == "POST":
                     if sessions.throttled():
-                        return self._html(ui.login(theme, "Too many attempts. Wait a few minutes."), 429)
+                        return self._html(ui.login("Too many attempts. Wait a few minutes."), 429)
                     given = self._form(body).get("password", "").encode()
                     if hmac.compare_digest(given, cfg.get("UI_PASSWORD").encode()):
                         token, _ = sessions.create()
                         return self._redirect("/", {"Set-Cookie": f"bt_session={token}; Path=/; HttpOnly; Secure; "
                                                                   f"SameSite=Strict; Max-Age={SESSION_TTL}"})
                     sessions.failed()
-                    return self._html(ui.login(theme, "That password isn't right."), 401)
-                return self._html(ui.login(theme))
+                    return self._html(ui.login("That password isn't right."), 401)
+                return self._html(ui.login())
             token = self._cookie()
             csrf = sessions.get(token)
             if not csrf:
@@ -328,7 +325,7 @@ def make_handler(service, hub: Hub | None):
             alerts = len(hub.warnings())
 
             def render(title, current, body_html):
-                return self._html(ui.page(title, current, body_html, theme, csrf, t, alerts))
+                return self._html(ui.page(title, current, body_html, csrf, t, alerts))
 
             parts = [p for p in path.split("/") if p]
             if method == "GET":

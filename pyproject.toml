@@ -21,7 +21,7 @@ backtrack = "backtrack.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-backtrack = ["static/*", "static/fonts/*"]
+backtrack = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

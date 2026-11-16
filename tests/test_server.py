@@ -135,7 +135,7 @@ def test_ui_login_csrf_and_pages(hub):
     opener.addheaders = [("Cookie", cookie)]
 
     status, _, html = get("/")
-    assert status == 200 and "app" in html and 'data-theme="plain"' in html
+    assert status == 200 and "app" in html and "/static/style.css" in html
     csrf = html.split('name="csrf" value="')[1].split('"')[0]
     for path in ("/stacks/app", "/agents", "/agents/echo", "/jobs", "/repository"):
         assert get(path)[0] == 200, path
@@ -150,7 +150,7 @@ def test_ui_login_csrf_and_pages(hub):
 
 
 def test_static_files_only_from_allowlist(hub):
-    with urllib.request.urlopen(hub.base + "/static/bundle.css", timeout=10) as r:
-        assert r.status == 200 and b"ob-" in r.read(200)
+    with urllib.request.urlopen(hub.base + "/static/style.css", timeout=10) as r:
+        assert r.status == 200 and b"--bg" in r.read(2000)
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(hub.base + "/static/../server.py", timeout=10)

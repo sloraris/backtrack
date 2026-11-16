@@ -79,7 +79,6 @@ survives restarts and redeploys. The one exception is `MAINTENANCE`, see [Mainte
 | `VERIFY_SCHEDULE` | day of month and time | `1 14:00` |
 | `HUB` | serve the UI and public API | `false` |
 | `UI_PASSWORD`, `READ_TOKEN`, `WRITE_TOKEN` | hub auth (secrets) | hub only |
-| `THEME` | `default` or `orbit` | `default` |
 | `DISCORD_WEBHOOK_URL` | failure alerts (secret) | off |
 | `ALERT_WEBHOOK_URL` | failure alerts as plain JSON (secret) | off |
 | `HEARTBEAT_URL` | push URL (Uptime Kuma, Healthchecks.io) (secret) | off |
@@ -249,8 +248,8 @@ Failure alerts.
 
 ## Hub UI
 
-Server-rendered HTML with a little vanilla JS. Neutral styles by default, `THEME=orbit` for the Orbit design
-system.
+Server-rendered HTML with a little vanilla JS and one neutral stylesheet that follows the browser's light or
+dark setting.
 
 - Fleet: agents (online, version, current job, last nightly), warnings (offline agent, no maintenance lease, two
   maintenance claims).
@@ -299,7 +298,6 @@ services:
       HEARTBEAT_URL: ${HEARTBEAT_URL}
       # hub agent only:
       HUB: "true"
-      THEME: orbit
       UI_PASSWORD: ${UI_PASSWORD}
       READ_TOKEN: ${READ_TOKEN}
       WRITE_TOKEN: ${WRITE_TOKEN}
@@ -363,4 +361,4 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 12 | Settings: env locks, UI fills the gaps, saved per agent. |
 | 13 | One maintenance agent via a lease on the share; the hub assigns it while active. |
 | 14 | Alerts: Discord and a generic JSON webhook; heartbeat to any push URL. |
-| 15 | UI neutral by default, Orbit design as a theme. |
+| 15 | One neutral UI theme (light/dark). The Orbit theme was dropped after v0.1.0 to keep Backtrack standalone. |

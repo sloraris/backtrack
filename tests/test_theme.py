@@ -1,22 +1,19 @@
-"""WCAG contrast for the plain theme, using the same pairs as Orbit's checks/contrast.py."""
+"""WCAG contrast for the hub's light and dark colours in static/style.css."""
 
 import re
 from pathlib import Path
 
 import pytest
 
-CSS = (Path(__file__).parent.parent / "src/backtrack/static/plain.css").read_text()
+CSS = (Path(__file__).parent.parent / "src/backtrack/static/style.css").read_text()
 
 
-def blocks():
-    light = CSS.split("@media")[0]
-    dark = CSS.split("@media")[1]
-    lv = dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9a-fA-F]{6,8})", light))
-    dv = {**lv, **dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9a-fA-F]{6,8})", dark))}
-    for v in (lv, dv):
-        v["link"] = v["soft"]
-        v["secondary-content"] = v["base-content"]
-    return {"light": lv, "dark": dv}
+def tokens():
+    light_block = CSS.split("@media (prefers-color-scheme: dark)")[0]
+    dark_block = CSS.split("@media (prefers-color-scheme: dark)")[1].split("\n}\n")[0]
+    hexes = r"--([a-z0-9-]+):\s*(#[0-9a-fA-F]{6})\b"
+    light = dict(re.findall(hexes, light_block))
+    return {"light": light, "dark": {**light, **dict(re.findall(hexes, dark_block))}}
 
 
 def lum(h):
@@ -30,17 +27,14 @@ def ratio(a, b):
     return (max(a, b) + 0.05) / (min(a, b) + 0.05)
 
 
-SURF = ["base-300", "base-200", "base-100"]
-PAIRS = ([(t, s, 4.5) for t in ("base-content", "muted", "soft", "link", "code-ink", "success", "warning",
-                                "error", "info") for s in SURF]
-         + [("primary-content", "primary", 4.5), ("secondary-content", "secondary", 4.5)]
-         + [(f"{s}-content", s, 4.5) for s in ("success", "warning", "error", "info")]
-         + [("glow", s, 3.0) for s in SURF] + [("rim-strong", s, 3.0) for s in SURF])
+SURFACES = ["bg", "surface", "surface-2"]
+PAIRS = ([(t, s, 4.5) for t in ("text", "muted", "code", "link", "ok", "warn", "err", "info") for s in SURFACES]
+         + [("accent-text", "accent", 4.5), ("on-status", "err", 4.5)]
+         + [("focus", s, 3.0) for s in SURFACES] + [("border-strong", s, 3.0) for s in SURFACES])
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
-def test_plain_theme_contrast(mode):
-    v = blocks()[mode]
-    fails = [f"{fg} on {bg}: {ratio(v[fg][:7], v[bg][:7]):.2f}" for fg, bg, need in PAIRS
-             if ratio(v[fg][:7], v[bg][:7]) < need]
+def test_contrast(mode):
+    v = tokens()[mode]
+    fails = [f"{fg} on {bg}: {ratio(v[fg], v[bg]):.2f}" for fg, bg, need in PAIRS if ratio(v[fg], v[bg]) < need]
     assert not fails, fails

@@ -67,7 +67,7 @@ Named volumes aren't supported yet: keep stack data in bind-mounted folders.
 ## Settings
 
 Set in the environment, or as `<NAME>_FILE` pointing at a file for secrets. A setting from the environment is
-locked in the UI. The schedule, retention and theme can be changed from the UI when the environment doesn't set
+locked in the UI. The schedule and retention can be changed from the UI when the environment doesn't set
 them, and are saved on that agent.
 
 | Variable | Default | |
@@ -89,7 +89,6 @@ them, and are saved on that agent.
 | `AGENT_URL` | | How the hub reaches this agent. |
 | `CLUSTER_KEY` | | Shared by all agents; signs hub-to-agent calls. |
 | `UI_PASSWORD`, `READ_TOKEN`, `WRITE_TOKEN` | | Hub only. |
-| `THEME` | `default` | `default` (neutral, follows light/dark) or `orbit`. |
 | `DISCORD_WEBHOOK_URL`, `ALERT_WEBHOOK_URL` | | Failure alerts. |
 | `HEARTBEAT_URL` | | Called with `status=up\|down&msg=…` after every nightly run. |
 | `HOOK_PRE_STOP_URL`, `HOOK_POST_START_URL` | | Stop hooks for every stack. |

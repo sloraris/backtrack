@@ -35,7 +35,6 @@ DEFAULTS: dict[str, str] = {
     "PRUNE_SCHEDULE": "sun 13:00",
     "VERIFY_SCHEDULE": "1 14:00",
     "HUB": "false",
-    "THEME": "default",
     "LISTEN": "0.0.0.0:8080",
     "RESTIC_BINARY": "restic",
     "DOCKER_SOCKET": "/var/run/docker.sock",
@@ -47,7 +46,7 @@ DEFAULTS: dict[str, str] = {
 }
 
 # Keys the hub UI may change when the environment doesn't set them.
-SETTABLE = ("BACKUP_SCHEDULE", "KEEP", "PRUNE_SCHEDULE", "VERIFY_SCHEDULE", "THEME", "MAINTENANCE")
+SETTABLE = ("BACKUP_SCHEDULE", "KEEP", "PRUNE_SCHEDULE", "VERIFY_SCHEDULE", "MAINTENANCE")
 
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _HHMM = r"([01]\d|2[0-3]):[0-5]\d"
@@ -56,7 +55,6 @@ VALIDATORS = {
     "PRUNE_SCHEDULE": re.compile(rf"^({'|'.join(_DAYS)}) {_HHMM}$"),
     "VERIFY_SCHEDULE": re.compile(rf"^([1-9]|1\d|2[0-8]) {_HHMM}$"),
     "KEEP": re.compile(r"^(daily|weekly|monthly|yearly|last|hourly)=\d+(,(daily|weekly|monthly|yearly|last|hourly)=\d+)*$"),
-    "THEME": re.compile(r"^(default|orbit)$"),
     "MAINTENANCE": re.compile(r"^(true|false)$"),
 }
 

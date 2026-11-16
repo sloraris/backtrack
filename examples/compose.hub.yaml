@@ -12,7 +12,6 @@ services:
       AGENT_URL: https://backup-echo.example.com
       TZ: America/Boise
       HUB: "true"
-      THEME: default                    # or orbit
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
       CLUSTER_KEY: ${CLUSTER_KEY}
       UI_PASSWORD: ${UI_PASSWORD}       # admin sign-in for the web UI

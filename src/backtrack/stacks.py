@@ -133,18 +133,48 @@ def has_files(path: Path) -> bool:
     return False
 
 
-def literal_ignores(ignore_file: Path, stack_path: Path) -> list[Path]:
-    """Literal (wildcard-free) entries of a .backupignore, as paths relative to the stack folder."""
+def _ignore_lines(ignore_file: Path) -> list[str]:
     try:
         lines = ignore_file.read_text().splitlines()
     except (FileNotFoundError, UnicodeDecodeError):
         return []
+    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _glob_escape(path: str) -> str:
+    return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in path)
+
+
+def restic_excludes(ignore_file: Path, stack_path: Path) -> list[str]:
+    """The .backupignore lines as restic exclude patterns that can only match inside the stack folder.
+
+    restic matches a pattern without a leading / against the whole absolute path, so `cache/` would also match
+    /opt/cache and exclude everything under it. Here, like .gitignore: a name without a slash (`cache/`, `*.log`)
+    matches at any depth inside the folder, a path with a slash in the middle (`data/tmp`) is relative to the
+    folder, and a leading / is an absolute path. `!` negates.
+    """
+    root = _glob_escape(str(stack_path).rstrip("/"))
     out = []
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("!"):
+    for line in _ignore_lines(ignore_file):
+        neg = line.startswith("!")
+        body = line[1:].strip() if neg else line
+        if not body:
             continue
-        if any(ch in line for ch in "*?[]\\$"):
+        if body.startswith("/"):
+            pattern = body
+        elif "/" in body.rstrip("/"):
+            pattern = f"{root}/{body}"
+        else:
+            pattern = f"{root}/**/{body}"
+        out.append(("!" if neg else "") + pattern)
+    return out
+
+
+def literal_ignores(ignore_file: Path, stack_path: Path) -> list[Path]:
+    """Literal (wildcard-free) entries of a .backupignore, as paths relative to the stack folder."""
+    out = []
+    for line in _ignore_lines(ignore_file):
+        if line.startswith("!") or any(ch in line for ch in "*?[]\\$"):
             continue
         p = Path(line.rstrip("/"))
         if p.is_absolute():
@@ -156,3 +186,16 @@ def literal_ignores(ignore_file: Path, stack_path: Path) -> list[Path]:
             continue
         out.append(p)
     return out
+
+
+def literal_matches(folder: Path, entries: list[Path]) -> list[Path]:
+    """Where each literal entry exists in `folder`: a bare name at any depth, a longer path from the top."""
+    names = {e.name for e in entries if len(e.parts) == 1}
+    found = [e for e in entries if len(e.parts) > 1 and ((folder / e).exists() or (folder / e).is_symlink())]
+    if names:
+        for dirpath, dirnames, filenames in os.walk(folder):
+            here = Path(dirpath).relative_to(folder)
+            for n in [d for d in dirnames if d in names] + [f for f in filenames if f in names]:
+                found.append(here / n)
+            dirnames[:] = [d for d in dirnames if d not in names]  # don't look inside what is carried whole
+    return sorted(set(found), key=lambda p: (len(p.parts), str(p)))

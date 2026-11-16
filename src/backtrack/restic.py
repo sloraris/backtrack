@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,13 @@ def _parse_time(s: str) -> datetime:
         s = f"{head}.{frac[:6]}{tz}"
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
+
+# Snapshots Backtrack takes on its own schedule or on request, which the retention policy applies to. A
+# "pre-restore" snapshot is a safety copy of the folder taken just before a restore: it is never "latest" while a
+# regular snapshot exists, and it has its own retention so it can't take a regular snapshot's daily slot.
+REGULAR_TRIGGERS = ("nightly", "manual", "pre-migrate")
+SAFETY_TRIGGER = "pre-restore"
+SAFETY_KEEP_WITHIN = "30d"
 
 _GO_SETUID, _GO_SETGID, _GO_STICKY = 1 << 23, 1 << 22, 1 << 20
 
@@ -128,13 +136,16 @@ class Restic:
         self.run("init", lock=False)
 
     # -- snapshots ------------------------------------------------------------------------------------------
-    def backup(self, path: Path, host: str, tags: list[str], exclude_file: Path | None = None) -> Snapshot:
+    def backup(self, path: Path, host: str, tags: list[str], excludes: list[str] | None = None) -> Snapshot:
         args = ["backup", str(path), "--host", host, "--json", "--exclude-caches", "--one-file-system"]
         for t in tags:
             args += ["--tag", t]
-        if exclude_file and exclude_file.is_file():
-            args += ["--exclude-file", str(exclude_file)]
-        out = self.run(*args)
+        with tempfile.NamedTemporaryFile("w", prefix="backtrack-exclude-", suffix=".txt") as ex:
+            if excludes:
+                ex.write("\n".join(excludes) + "\n")
+                ex.flush()
+                args += ["--exclude-file", ex.name]
+            out = self.run(*args)
         snap_id = None
         for line in out.splitlines():
             try:
@@ -168,8 +179,10 @@ class Restic:
         raise ResticError(f"snapshot {snap_id} not found")
 
     def latest(self, host: str) -> Snapshot | None:
+        """The newest regular snapshot of a stack, or its newest safety snapshot if that's all there is."""
         snaps = self.snapshots(host)
-        return snaps[-1] if snaps else None
+        regular = [s for s in snaps if s.tag("trigger") != SAFETY_TRIGGER]
+        return (regular or snaps or [None])[-1]
 
     def restore(self, snapshot: Snapshot, target: Path) -> None:
         """Restore the snapshot's (single) backed-up folder so its contents land in `target`."""
@@ -185,7 +198,8 @@ class Restic:
     def root_node(self, snapshot: Snapshot) -> dict | None:
         """The snapshot's metadata for its backed-up folder itself (`restic ls` prints it first)."""
         root = snapshot.paths[0]
-        cmd = [self.binary, "ls", "--json", snapshot.id, root]
+        # --no-lock: this is killed as soon as the first node arrives, and a killed restic leaves its lock behind
+        cmd = [self.binary, "ls", "--no-lock", "--json", snapshot.id, root]
         with subprocess.Popen(cmd, env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               text=True) as proc:
             try:
@@ -201,22 +215,39 @@ class Restic:
         return None
 
     def forget(self, host: str, keep: dict[str, int]) -> None:
-        args = ["forget", "--host", host, "--group-by", "host"]
-        for k, v in keep.items():
-            if v > 0:
-                args += [f"--keep-{k}", str(v)]
-        if len(args) == 5:
+        """Apply the retention policy to a stack's regular snapshots, then expire its old safety snapshots."""
+        policy = [arg for k, v in keep.items() if v > 0 for arg in (f"--keep-{k}", str(v))]
+        if not policy:
             return  # an all-zero policy would delete everything; never do that implicitly
-        self.run(*args)
+        self.unlock_stale()
+        regular = [arg for t in REGULAR_TRIGGERS for arg in ("--tag", f"trigger={t}")]  # repeated --tag means any
+        self.run("forget", "--host", host, "--group-by", "host", *regular, *policy)
+        self.run("forget", "--host", host, "--group-by", "host", "--tag", f"trigger={SAFETY_TRIGGER}",
+                 "--keep-within", SAFETY_KEEP_WITHIN, "--keep-last", "1")
+
+    def unlock_stale(self) -> None:
+        """Remove stale locks before an operation that needs the repository to itself.
+
+        restic doesn't skip a lock left by a process that died (a crash, a killed container); it waits for it until
+        --retry-lock runs out. `restic unlock` removes only stale locks: from a process that is gone on this machine,
+        or not refreshed for 30 minutes. Another agent's live lock is left alone.
+        """
+        try:
+            self.run("unlock", lock=False, timeout=600)
+        except ResticError:
+            pass  # the operation itself will report a real problem with the repository
 
     def forget_ids(self, ids: list[str]) -> None:
         if ids:
+            self.unlock_stale()
             self.run("forget", *ids)
 
     def prune(self) -> str:
+        self.unlock_stale()
         return self.run("prune")
 
     def check(self, subset: str | None = None) -> str:
+        self.unlock_stale()
         args = ["check"]
         if subset:
             args += [f"--read-data-subset={subset}"]

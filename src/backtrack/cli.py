@@ -96,7 +96,12 @@ def main(argv: list[str] | None = None) -> int:
         print("repository created")
         return 0
     if args.cmd == "list":
-        for s in agent.stacks():
+        try:
+            stacks = agent.stacks()
+        except Exception as e:  # noqa: BLE001 - docker socket missing, daemon refusing, ...
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        for s in stacks:
             print(f"{s.name:24} {s.mode or '-':5} {s.state:8} {s.path}" + (f"  ERROR: {s.error}" if s.error else ""))
         return 0
     if args.cmd == "snapshots":

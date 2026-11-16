@@ -12,7 +12,8 @@ services:
       backtrack.hook.post-start: ${UNSILENCE_URL}
       # backtrack.post-restore: bash /srv/myapp/setup.sh   # runs on the host after a restore
 
-# /opt/appdata/myapp/.backupignore (restic exclude syntax). Literal paths listed here are kept
+# /opt/appdata/myapp/.backupignore (read like .gitignore: `cache/` matches at any depth inside the folder).
+# Literal paths listed here are kept
 # in place on a restore instead of being left in myapp.pre-restore.
 #   cache/
 #   *.log

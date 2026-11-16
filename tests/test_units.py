@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -7,7 +8,7 @@ from backtrack.config import Config, ConfigError, parse_keep
 from backtrack.docker import Container, demux_logs, parse_depends_on
 from backtrack.schedule import next_run
 from backtrack.signing import Verifier, sign
-from backtrack.stacks import L_MODE, Stack, discover, has_files, literal_ignores
+from backtrack.stacks import L_MODE, Stack, discover, has_files, literal_ignores, literal_matches, restic_excludes
 
 TZ = ZoneInfo("America/Boise")
 
@@ -156,3 +157,63 @@ def test_go_mode_to_unix():
     assert go_mode_to_unix(2147484136) == 0o750  # dir bit + 0750, as restic prints it
     assert go_mode_to_unix((1 << 31) | (1 << 22) | 0o775) == 0o2775  # setgid dir
     assert go_mode_to_unix((1 << 20) | 0o777) == 0o1777  # sticky
+
+
+def test_docker_api_version_comes_from_the_daemon():
+    import http.server
+    import socketserver
+    import tempfile
+    import threading
+
+    from backtrack.docker import Docker
+
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            body = b"OK" if self.path == "/_ping" else b"[]"
+            self.send_response(200)
+            self.send_header("Api-Version", "1.52")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+        def address_string(self):
+            return "unix"
+
+    class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    sock = tempfile.mkdtemp(dir="/tmp") + "/d.sock"
+    srv = Server(sock, Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        d = Docker(sock)
+        assert d.containers() == [] and d.containers() == []
+        assert seen == ["/_ping", "/v1.52/containers/json?all=1", "/v1.52/containers/json?all=1"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_restic_excludes_are_anchored(tmp_path):
+    root = tmp_path / "st[1]"
+    root.mkdir()
+    f = root / ".backupignore"
+    f.write_text("# c\ncache/\n*.log\ndata/tmp\n!keep.log\n/etc/abs\n\n")
+    r = str(root).replace("[", "\\[").replace("]", "\\]")
+    assert restic_excludes(f, root) == [f"{r}/**/cache/", f"{r}/**/*.log", f"{r}/data/tmp", f"!{r}/**/keep.log",
+                                        "/etc/abs"]
+    assert restic_excludes(root / "missing", root) == []
+
+
+def test_literal_matches_at_any_depth(tmp_path):
+    for rel in ("cache/a", "x/cache/b", "x/cache/cache/c", "data/tmp/d", "other/f"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("1")
+    found = literal_matches(tmp_path, [Path("cache"), Path("data/tmp"), Path("nope/x")])
+    assert [str(p) for p in found] == ["cache", "data/tmp", "x/cache"]

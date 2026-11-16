@@ -70,6 +70,17 @@ def test_excludes_from_backupignore(lab):
     assert d.exists()
 
 
+def test_ignore_patterns_never_match_folders_above_the_stack(lab):
+    # restic alone would match `appdata` against <tmp>/appdata/app and exclude everything (found on a real host
+    # with `cache/` and a stack under /opt/cache)
+    lab.stack_dir("app", {"keep.txt": "1", "sub/appdata/x": "2", "logs/a.log": "3",
+                          ".backupignore": f"appdata/\n*.log\n# comment\n{lab.appdata}/app/missing\n"})
+    lab.docker.add("app", "web", {L_MODE: "live"})
+    lab.agent.backup("app", lab.job())
+    files, _ = lab.restic.ls_files(lab.restic.latest("app"))
+    assert files == 2  # keep.txt and .backupignore; sub/appdata/ and *.log excluded at any depth
+
+
 def test_custom_path_label(lab, tmp_path):
     custom = tmp_path / "elsewhere"
     (custom / "x").mkdir(parents=True)

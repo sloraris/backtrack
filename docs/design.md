@@ -99,7 +99,12 @@ project; if two containers disagree, the stack is reported as misconfigured and 
 | `backtrack.hook.post-start=<url>` | POSTed after starting again |
 | `backtrack.post-restore=<shell command>` | run on the host after a restore, before the stack starts |
 
-- Excludes come from `<path>/.backupignore` (restic `--exclude-file` syntax).
+- Excludes come from `<path>/.backupignore`, one pattern per line, read like `.gitignore`: a name without a
+  slash (`cache/`, `*.log`) matches at any depth inside the folder, a path with a slash in the middle
+  (`data/tmp`) is relative to the folder, a leading `/` is an absolute path, `!` negates and `#` is a comment.
+  Backtrack anchors every pattern under the stack folder before handing it to restic, because restic on its own
+  matches relative patterns against the whole absolute path (`cache/` would match `/opt/cache` and exclude
+  everything; found in the first test on a real host).
 - Named volumes are not supported in v1, and are not looked at.
 - A stack whose folder is missing or empty is reported as an error and never backed up: an empty "latest"
   snapshot would make the next auto-restore wipe the stack.
@@ -113,13 +118,18 @@ project; if two containers disagree, the stack is reported as misconfigured and 
 ```
 restic backup <path> --host <stack> \
   --tag stack=<stack> --tag machine=<MACHINE> --tag trigger=<nightly|manual|pre-restore|pre-migrate> \
-  --exclude-file <path>/.backupignore --exclude-caches --one-file-system
+  --exclude-file <.backupignore anchored under path> --exclude-caches --one-file-system
 ```
 
 - `--host <stack>` makes each stack its own series. restic picks the parent by host and path, so a stack that
   moves to another machine keeps its history and stays incremental. Paths are the same inside and outside the
   container because data folders are mounted at their host paths.
-- After each backup: `restic forget --host <stack> --keep-...` with that stack's retention.
+- After each backup: `restic forget --host <stack> --tag trigger=nightly --tag trigger=manual
+  --tag trigger=pre-migrate --keep-...` with that stack's retention, then `restic forget --host <stack>
+  --tag trigger=pre-restore --keep-within 30d --keep-last 1`. Safety snapshots have their own retention so one
+  taken late in a day can't take that day's daily slot from the nightly.
+- "Latest" (restore, auto-restore, restore test) is the newest regular snapshot. A safety snapshot is used only
+  when a stack has nothing else; to roll back a restore, pick it by id.
 - Every restic call uses `--retry-lock 2h`, so backups and forgets wait out a prune instead of failing.
 
 ### Stop mode
@@ -159,8 +169,8 @@ just another `stop` stack: the agent talks to Docker directly.
    `.pre-restore.<timestamp>`. Backtrack never deletes either.
 4. `restic restore <id>:<path> --target <path>`. The agent runs as root, so owners, groups and modes come back
    as recorded.
-5. Carry over excluded data: every literal path in `.backupignore` (no wildcards, no negations) that exists in
-   `.pre-restore` and not in the restored folder is moved across. This keeps data that was never in the
+5. Carry over excluded data: every literal path in `.backupignore` (no wildcards, no negations; a bare name at
+   any depth) that exists in `.pre-restore` and not in the restored folder is moved across. This keeps data that was never in the
    snapshot (Pelican's game volumes) where the stack expects it.
 6. Run `backtrack.post-restore`, if set (see [Host commands](#host-commands)).
 7. Start the containers that were running before (all of them if none existed), then post-start hooks.

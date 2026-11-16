@@ -226,8 +226,12 @@ def stack_page(stack: dict, agent: dict, snapshots: list[dict], csrf: str) -> st
     snaps = (f'<div class="bt-table-wrap"><table class="bt-table"><thead><tr><th>Taken</th><th>Machine</th>'
              f'<th>Trigger</th><th class="num">Added</th><th>Snapshot</th></tr></thead><tbody>{snap_rows}</tbody>'
              f'</table></div>' if snapshots else empty("No snapshots yet", "The first one is taken at the next nightly run."))
-    options = "".join(f'<option value="{e(s["id"])}">{e(s["time"][:16].replace("T", " "))} · {e(s["short_id"])} · '
-                      f'{e(s.get("machine") or "")}</option>' for s in reversed(snapshots))
+    newest = reversed(snapshots)
+    pick = next((s["id"] for s in reversed(snapshots) if s.get("trigger") != "pre-restore"), None)
+    options = "".join(
+        f'<option value="{e(s["id"])}"{" selected" if s["id"] == pick else ""}>{e(s["time"][:16].replace("T", " "))} · '
+        f'{e(s["short_id"])} · {e(s.get("machine") or "")}'
+        f'{" · before a restore" if s.get("trigger") == "pre-restore" else ""}</option>' for s in newest)
     restore = (
         f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">Restore</h2>'
         f'<p class="bt-small bt-muted">Stops the stack, keeps the current folder as {e(name)}.pre-restore and starts it again.</p></div></div>'

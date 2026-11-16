@@ -17,7 +17,8 @@ from backtrack.jobs import Job, exclusive
 from backtrack.notify import Notifier, call_hooks
 from backtrack.restic import Restic, ResticError, Snapshot
 from backtrack.share import Share
-from backtrack.stacks import IGNORE_FILE, NAME_RE, Stack, discover, has_files, literal_ignores
+from backtrack.stacks import (IGNORE_FILE, NAME_RE, Stack, discover, has_files, literal_ignores, literal_matches,
+                              restic_excludes)
 
 
 class OpError(Exception):
@@ -112,7 +113,7 @@ class Agent:
     def _snapshot_folder(self, name: str, path: Path, trigger: str, job: Job) -> Snapshot:
         job.log(f"restic backup {path} (stack {name}, trigger {trigger})")
         snap = self.restic.backup(path, host=name, tags=self._tags(name, trigger),
-                                  exclude_file=path / IGNORE_FILE)
+                                  excludes=restic_excludes(path / IGNORE_FILE, path))
         added = snap.summary.get("data_added")
         job.log(f"snapshot {snap.short_id} saved" + (f", {added} bytes added" if added is not None else ""))
         return snap
@@ -195,7 +196,7 @@ class Agent:
     @staticmethod
     def _carry_over(old: Path, new: Path, job: Job) -> None:
         """Move data that was excluded from backups from the old folder into the restored one."""
-        for rel in literal_ignores(old / IGNORE_FILE, old):
+        for rel in literal_matches(old, literal_ignores(old / IGNORE_FILE, old)):
             src, dst = old / rel, new / rel
             if not (src.exists() or src.is_symlink()) or dst.exists() or dst.is_symlink():
                 continue

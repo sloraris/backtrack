@@ -1,5 +1,7 @@
 import os
 import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -96,6 +98,14 @@ def test_excluded_paths_are_carried_over(lab):
     # wildcard patterns are not carried over
     assert not (d / "logs" / "x.log").exists()
     assert (d.with_name("app.pre-restore") / "logs" / "x.log").exists()
+
+
+def test_nested_excluded_folders_are_carried_over(lab):
+    d, _ = backed_up(lab, files={"a/cache/x": "A", "b/c/cache/y": "B", "f": "1", ".backupignore": "cache/\n"})
+    lab.agent.restore("app", lab.job())
+    assert (d / "a" / "cache" / "x").read_text() == "A"
+    assert (d / "b" / "c" / "cache" / "y").read_text() == "B"
+    assert (d / "f").read_text() == "1"
 
 
 def test_post_restore_runs_before_start(lab):
@@ -260,3 +270,56 @@ def test_auto_restore_root_folder_mode(lab):
     shutil.rmtree(d)
     assert lab.agent.auto_restore("app", lab.job()) == 0
     assert d.stat().st_mode & 0o7777 == 0o710
+
+
+def test_safety_snapshot_is_never_latest(lab):
+    # found on a real host: after a restore, auto-restore brought back the broken state from the safety snapshot
+    d, good = backed_up(lab, files={"f": "good"})
+    (d / "f").write_text("broken")
+    result = lab.agent.restore("app", lab.job())
+    assert lab.restic.latest("app").id.startswith(good)
+    shutil.rmtree(d)
+    assert lab.agent.auto_restore("app", lab.job()) == 0
+    assert (d / "f").read_text() == "good"
+    # the safety snapshot can still be restored by id, to roll the restore back
+    lab.agent.restore("app", lab.job(), result["safety_snapshot"])
+    assert (d / "f").read_text() == "broken"
+
+
+def test_retention_keeps_safety_snapshots_apart(lab, monkeypatch):
+    calls = []
+    monkeypatch.setattr(lab.restic, "run", lambda *a, **k: calls.append(a) or "")
+    lab.restic.forget("app", {"daily": 7, "weekly": 0})
+    unlock, regular, safety = calls
+    assert unlock == ("unlock",)
+    assert regular[:5] == ("forget", "--host", "app", "--group-by", "host")
+    assert "trigger=pre-restore" not in regular and "trigger=nightly" in regular and "--keep-daily" in regular
+    assert "--keep-weekly" not in regular
+    assert safety[-6:] == ("--tag", "trigger=pre-restore", "--keep-within", "30d", "--keep-last", "1")
+    calls.clear()
+    lab.restic.forget("app", {"daily": 0})
+    assert calls == []
+
+
+def test_restore_leaves_no_lock_behind(lab):
+    # found on a real host: the root-folder `restic ls` was killed early and its lock blocked the next forget
+    backed_up(lab, files={"f": "x"})
+    lab.agent.restore("app", lab.job())
+    shutil.rmtree(lab.appdata / "app")
+    assert lab.agent.auto_restore("app", lab.job()) == 0
+    assert lab.restic.run("list", "locks", "--no-lock", lock=False).strip() == ""
+
+
+def test_stale_lock_is_removed_before_forget(lab):
+    backed_up(lab, files={"f": "x"})
+    # a restic process that dies holding its lock (crash, killed container) leaves a stale lock behind
+    proc = subprocess.Popen([lab.restic.binary, "ls", "--json", "latest", "--host", "app"], env=lab.restic._env(),
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc.stdout.readline()
+    proc.kill()
+    proc.wait()
+    locks = Path(lab.restic.repository) / "locks"
+    assert list(locks.iterdir()), "expected a stale lock from the killed process"
+    lab.restic.retry_lock = "1s"
+    lab.restic.forget("app", {"daily": 7})  # fails on the lock without unlock_stale
+    assert not list(locks.iterdir())

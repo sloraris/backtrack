@@ -5,13 +5,16 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import socket
 import struct
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import quote, urlencode
 
-API = "/v1.41"
+# The API version is taken from the daemon (GET /_ping), never pinned: Docker 29 refuses clients older than 1.44,
+# and everything Backtrack calls (list, stop, start, create, wait, logs, delete) is the same across versions.
+_VERSION_RE = re.compile(r"\d+\.\d+")
 
 
 class DockerError(Exception):
@@ -66,19 +69,32 @@ class Docker:
     def __init__(self, socket_path: str = "/var/run/docker.sock", helper_image: str = ""):
         self.socket_path = socket_path
         self.helper_image = helper_image
+        self._api: str | None = None
 
-    def _request(self, method: str, path: str, body=None, timeout: float = 120) -> tuple[int, bytes]:
+    def _raw(self, method: str, path: str, body=None, timeout: float = 120) -> tuple[int, bytes, dict[str, str]]:
         conn = _UnixConnection(self.socket_path, timeout)
         try:
             data = json.dumps(body).encode() if body is not None else None
             headers = {"Content-Type": "application/json"} if data is not None else {}
-            conn.request(method, API + path, body=data, headers=headers)
+            conn.request(method, path, body=data, headers=headers)
             resp = conn.getresponse()
-            return resp.status, resp.read()
+            return resp.status, resp.read(), {k.lower(): v for k, v in resp.getheaders()}
         except OSError as e:
             raise DockerError(f"docker socket: {e}") from e
         finally:
             conn.close()
+
+    def api_prefix(self) -> str:
+        """`/v<daemon's API version>`, or no prefix (the daemon's own default) if it doesn't say."""
+        if self._api is None:
+            _, _, headers = self._raw("GET", "/_ping", timeout=30)
+            version = headers.get("api-version", "")
+            self._api = f"/v{version}" if _VERSION_RE.fullmatch(version) else ""
+        return self._api
+
+    def _request(self, method: str, path: str, body=None, timeout: float = 120) -> tuple[int, bytes]:
+        status, raw, _ = self._raw(method, self.api_prefix() + path, body, timeout)
+        return status, raw
 
     def _json(self, method: str, path: str, body=None, ok=(200, 201, 204, 304), timeout: float = 120):
         status, raw = self._request(method, path, body, timeout)

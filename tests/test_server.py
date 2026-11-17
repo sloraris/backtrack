@@ -57,7 +57,7 @@ def wait_job(lab, job_id, timeout=60):
 
 
 def test_healthz_needs_no_auth(hub):
-    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.1.1"})
+    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.2.0"})
 
 
 def test_agent_api_requires_signature(hub):

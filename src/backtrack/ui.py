@@ -123,7 +123,7 @@ def toast(key: str | None, detail: str = "") -> str:
 def head(title: str) -> str:
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)} · Backtrack</title>'
-            f'<link rel="icon" href="{static("favicon.svg")}"><link rel="stylesheet" href="{static("style.css")}"></head>')
+            f'<link rel="icon" href="{static("mark.svg")}"><link rel="stylesheet" href="{static("style.css")}"></head>')
 
 
 def page(title: str, current: str, body: str, csrf: str, toast_html: str = "", alerts: int = 0) -> str:

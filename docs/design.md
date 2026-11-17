@@ -6,7 +6,7 @@ Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one
 write to one shared restic repo. One agent can also run the hub: a web UI and API for the whole fleet. Agents
 never depend on the hub, the management plane (Komodo, Portainer, ...) or each other to back up and restore.
 
-Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and larger favicon in v0.2.1**. Decisions are recorded in [Decisions](#decisions).
+Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1**. Decisions are recorded in [Decisions](#decisions).
 
 ## Project
 

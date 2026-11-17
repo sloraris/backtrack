@@ -205,7 +205,7 @@ def test_stack_page_lists_set_aside_folders():
 def test_static_urls_carry_a_content_hash(hub):
     from backtrack import ui
     html = ui.login()
-    for name in ("mark.svg", "favicon.svg", "style.css"):
+    for name in ("mark.svg", "style.css"):
         url = ui.static(name)
         assert url.startswith(f"/static/{name}?v=") and len(url.split("=")[1]) == 10 and url in html
         with urllib.request.urlopen(hub.base + url, timeout=10) as r:  # the server ignores the query

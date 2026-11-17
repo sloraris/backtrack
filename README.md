@@ -137,6 +137,6 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 ```
 
 Design notes are in [docs/design.md](docs/design.md). The logo is in [design/logo](design/logo): the mark
-(also the UI's `static/mark.svg`), an icon on a dark circle (the UI's favicon), and square avatars (SVG and
+(also the UI's `static/mark.svg` and favicon), and square avatars (SVG and
 PNG) for chat webhooks, which crop them round. MIT licensed; see `src/backtrack/static/NOTICE.md` for
 the fonts, icons and design system that ship with the UI.

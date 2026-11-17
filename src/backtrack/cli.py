@@ -75,6 +75,15 @@ def main(argv: list[str] | None = None) -> int:
     pr_rm.add_argument("--path", help="just this folder (default: every one of the stack that is safe)")
     pr_rm.add_argument("--yes", action="store_true")
 
+    tk = sub.add_parser("token", help="API tokens for the hub's /api/v1: create, list, revoke")
+    tk_sub = tk.add_subparsers(dest="action", required=True)
+    tk_new = tk_sub.add_parser("create", help="mint a token; it is printed once")
+    tk_new.add_argument("name", help="what uses it, e.g. dashboard")
+    tk_new.add_argument("--scope", choices=["read", "write"], default="read")
+    tk_sub.add_parser("list", help="every token with its scope and when it was last used")
+    tk_rm = tk_sub.add_parser("revoke", help="revoke a token by id or name")
+    tk_rm.add_argument("token")
+
     args = p.parse_args(argv)
     if not args.cmd:
         args.cmd = "serve"
@@ -90,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
+
+    if args.cmd == "token":
+        return _token(cfg, args)
 
     from backtrack.service import Service, build_agent
     agent = build_agent(cfg)
@@ -142,6 +154,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "prerestore":
         return _prerestore(agent, args)
     return 2
+
+
+def _token(cfg: Config, args) -> int:
+    from datetime import datetime, timezone
+
+    from backtrack.tokens import TokenStore
+
+    def when(ts):
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else "never"
+
+    if not cfg.hub:
+        print("note: tokens are checked only by the hub (HUB=true); this agent isn't one", file=sys.stderr)
+    store = TokenStore(cfg.state_dir)
+    if args.action == "create":
+        try:
+            tok, secret = store.create(args.name, args.scope)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(f"created {tok.scope} token {tok.name} (id {tok.id}). It isn't shown again:", file=sys.stderr)
+        print(secret)
+        return 0
+    if args.action == "list":
+        items = store.list()
+        if not items:
+            print("no API tokens")
+        for t in items:
+            print(f"{t.id}  {t.scope:5}  {t.name:24}  created {when(t.created)}  last used {when(t.last_used)}")
+        return 0
+    gone = store.revoke(args.token)
+    if not gone:
+        print(f"no token {args.token!r}", file=sys.stderr)
+        return 1
+    print(f"revoked {gone.name} ({gone.id})")
+    return 0
 
 
 def _prerestore(agent, args) -> int:

@@ -50,11 +50,13 @@ ICONS = {
     "menu": _svg('<path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/>'),
     "refresh-cw": _svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
     "chevron-down": _svg('<path d="m6 9 6 6 6-6"/>'),
+    "settings-2": _svg('<path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>'),
     "log-out": _svg('<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>'),
 }
 
 NAV = (("stacks", "/", "Stacks", "box"), ("agents", "/agents", "Agents", "server"),
-       ("jobs", "/jobs", "Jobs", "scroll-text"), ("repository", "/repository", "Repository", "archive"))
+       ("jobs", "/jobs", "Jobs", "scroll-text"), ("repository", "/repository", "Repository", "archive"),
+       ("settings", "/settings", "Settings", "settings-2"))
 
 TOASTS = {
     "backup": ("success", "Backup queued", "It runs after any job already in progress on that host."),
@@ -63,6 +65,7 @@ TOASTS = {
     "saved": ("success", "Saved", "The agent uses the new value from now on."),
     "lease": ("success", "Maintenance agent changed", "Prune and repository checks now run there."),
     "prerestore": ("success", "Removal queued", "The agent checks the stack's health again before it deletes."),
+    "revoked": ("success", "Token revoked", "Requests with it are refused from now on."),
     "error": ("error", "That didn't work", ""),
 }
 
@@ -438,3 +441,48 @@ def repository_page(repo: str, snapshot_count: int | None, stack_count: int | No
             f'<div class="bt-panel">{details}</div>'
             f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">'
             f'Maintenance</h2></div></div>{form}</section></main>')
+
+
+def settings_page(tokens: list[dict], env_tokens: list[str], csrf: str, new: tuple[dict, str] | None = None,
+                  error: str = "") -> str:
+    """API tokens: mint one per integration, see when each was last used, revoke it."""
+    shown = ""
+    if new:
+        tok, secret = new
+        shown = (f'<div class="bt-callout bt-callout--success" role="status">{ICONS["circle-check"]}'
+                 f'<div class="bt-callout__text"><p class="bt-callout__title">Token {e(tok["name"])} created</p>'
+                 f'<p class="bt-callout__body">Copy it now: this is the only time it is shown. Send it as '
+                 f'<span class="bt-code">Authorization: Bearer &lt;token&gt;</span>.</p>'
+                 f'<input class="bt-input bt-input--mono" readonly value="{e(secret)}" aria-label="New token" '
+                 f'spellcheck="false" autocomplete="off"></div></div>')
+    warn = callout("error", "Token not created", error) if error else ""
+    rows = []
+    for t in tokens:
+        revoke = (f'<form method="post" action="/settings/tokens/{u(t["id"])}/revoke">'
+                  f'<input type="hidden" name="csrf" value="{e(csrf)}"><button class="bt-btn bt-btn--danger bt-btn--sm" '
+                  f'type="submit" aria-label="Revoke {e(t["name"])}">Revoke</button></form>')
+        rows.append(f'<tr><td class="bt-h3">{e(t["name"])}</td><td>{e(t["scope"])}</td>'
+                    f'<td>{e(ago(t.get("created")))}</td><td>{e(ago(t.get("last_used")))}</td><td>{revoke}</td></tr>')
+    for key in env_tokens:
+        scope = "write" if key == "WRITE_TOKEN" else "read"
+        rows.append(f'<tr><td class="bt-code">{e(key)}</td><td>{scope}</td><td>From env</td><td>–</td>'
+                    f'<td class="bt-muted">Unset it to revoke</td></tr>')
+    table = (f'<div class="bt-table-wrap"><table class="bt-table"><thead><tr><th>Name</th><th>Scope</th>'
+             f'<th>Created</th><th>Last used</th><th></th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+             if rows else empty("No API tokens", "Create one for each tool that calls the API."))
+    form = (f'<form class="bt-card" method="post" action="/settings/tokens"><div class="bt-stack">'
+            f'<input type="hidden" name="csrf" value="{e(csrf)}"><label class="bt-field">'
+            f'<span class="bt-field__label">Name</span><input class="bt-input" name="name" required maxlength="64" '
+            f'placeholder="dashboard" autocomplete="off"><span class="bt-field__help">What uses it, so you know '
+            f'which to revoke.</span></label><label class="bt-field"><span class="bt-field__label">Scope</span>'
+            f'<span class="bt-select"><select class="bt-input" name="scope"><option value="read">read: status, '
+            f'stacks, snapshots, jobs</option><option value="write">write: also backup, restore, remove set-aside '
+            f'folders</option></select>{ICONS["chevron-down"]}</span></label>'
+            f'<div class="bt-cluster bt-cluster--end"><button class="bt-btn bt-btn--primary" type="submit">'
+            f'Create token</button></div></div></form>')
+    return (f'<main id="main" class="bt-page bt-page--narrow">'
+            f'{header("Settings", "hub", "Tokens for tools that call /api/v1.")}{shown}{warn}'
+            f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">'
+            f'API tokens</h2></div></div><div class="bt-card bt-card--flush">{table}</div></section>'
+            f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">'
+            f'New token</h2></div></div>{form}</section></main>')

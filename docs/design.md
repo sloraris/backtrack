@@ -49,9 +49,14 @@ Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-hos
     body; 60 s clock skew allowed, nonces remembered for that window). Agents accept nothing else over HTTP.
   - People to hub: one admin password (`UI_PASSWORD`), session cookie (HttpOnly, Secure, SameSite=Strict, 12 h),
     CSRF tokens, rate-limited login.
-  - Programs to hub: bearer tokens with a scope. `READ_TOKEN` (status, stacks, snapshots, jobs; for dashboards and monitoring) and
-    `WRITE_TOKEN` (also backup and restore; for scripts). Each is compared in constant time and none works as
-    another.
+  - Programs to hub: bearer tokens with a scope, `read` (status, stacks, snapshots, jobs; for dashboards,
+    monitors and assistants) or `write` (also backup, restore and removing set-aside folders; for scripts).
+    Named tokens are minted per integration on the hub's Settings page or with `backtrack token create`, shown
+    once, and stored only as a SHA-256 hash in `STATE_DIR/tokens.json` (written atomically, mode 600) with
+    their created and last-used times (last use is written at most once a minute). Revoking one leaves the
+    others working. The static `READ_TOKEN` and `WRITE_TOKEN` from the environment work alongside them. Every
+    comparison is constant time and no token works as another. A token can't reach the UI, so it can't mint
+    more tokens.
 - **Network:** each agent's API is reached at its own route (`backup-<host>.example`), for example through the
   host's reverse proxy. A host outside the LAN can be reached over a VPN, with its route restricted to the VPN's
   range. Keep the hub off the public internet. `/healthz` needs no auth.
@@ -300,11 +305,13 @@ dark setting.
 - Stack: snapshots from the repo (any machine), Restore with typed confirmation, set-aside folders with their
   verdict and a Remove button (typed confirmation) once safe, job logs.
 - Agent: settings (env-set ones locked), maintenance lease.
+- Settings: API tokens (create with a name and scope, see when each was last used, revoke).
 
 ## APIs
 
 Agent API (hub only, signed): `GET /v1/status`, `GET /v1/stacks`, `GET /v1/stacks/{s}/snapshots`,
-`POST /v1/stacks/{s}/backup`, `POST /v1/stacks/{s}/restore`, `GET /v1/jobs/{id}`, `GET|PUT /v1/settings`,
+`POST /v1/stacks/{s}/backup`, `POST /v1/stacks/{s}/restore`, `GET /v1/jobs?limit=`, `GET /v1/jobs/{id}`,
+`GET|PUT /v1/settings`,
 `GET /v1/prerestore`, `POST /v1/stacks/{s}/prerestore/remove`.
 
 Hub API (bearer token or session), under `/api/v1`:
@@ -314,14 +321,18 @@ Hub API (bearer token or session), under `/api/v1`:
 | GET | `/status` | read: fleet summary, warnings, maintenance holder |
 | GET | `/agents` | read |
 | GET | `/stacks` | read |
+| GET | `/stacks/{stack}` | read: the stack as its agent reports it, `machine`, `agent_online`, `also_on`, `prerestore` |
 | GET | `/stacks/{stack}/snapshots` | read |
-| GET | `/jobs/{machine}/{id}` | read |
+| GET | `/jobs?limit=&machine=&stack=&state=` | read: recent jobs across online agents, newest first (`limit` 1–200, default 50; `state` is `queued`, `running`, `ok` or `failed`). Each has `machine`, `id`, `kind`, `stack`, `trigger` (`manual`, `pre-migrate`, `nightly` or `schedule`), `state`, `created`, `started`, `finished`, `error`; `unreachable` lists agents that didn't answer |
+| GET | `/jobs/{machine}/{id}` | read: one job with its log |
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
 | GET | `/prerestore` | read: set-aside folders, each with `state` (`settling`, `safe`, `unhealthy`, `failed`) |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>","machine":"…"}` | write; `machine` only when two agents have the path |
 
-A dashboard or monitor needs only the read token, for `/api/v1/status` and `/api/v1/stacks`.
+A dashboard, monitor or assistant needs only a read token: `/api/v1/status` and `/api/v1/stacks` for the
+overview, `/api/v1/jobs?state=failed` for recent failures and their errors, `/api/v1/jobs/{machine}/{id}` for
+a log.
 
 ## Deploying
 
@@ -387,7 +398,7 @@ pytest, with a real restic repo in a temp dir and a fake Docker client (records 
 - migration: backup tagged on machine A, restore on B uses the same series and B's next backup uses A's
   snapshot as parent.
 - maintenance lease: claim, renew, stale takeover, hub assignment, second claimant ignored.
-- scheduler across DST; signing (valid, expired, replayed, wrong key); token scopes; env-locked settings.
+- scheduler across DST; signing (valid, expired, replayed, wrong key); token scopes; named tokens (hash only, last used, revoke, CLI); env-locked settings.
 
 CI: tests on every push and PR; image build and push to GHCR from `main` and tags.
 
@@ -399,7 +410,7 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 2 | Python 3.13 stdlib only, restic binary in the image. |
 | 3 | Agent everywhere; hub is a mode of the same image, on one agent. Outside tools only observe, with the read token. |
 | 4 | Discovery by presence files on the shared share. |
-| 5 | Hub to agent signed with a cluster key; hub tokens scoped read/write; no per-agent tokens. |
+| 5 | Hub to agent signed with a cluster key; hub tokens scoped read/write; no per-agent tokens. Named hub tokens, one per integration, stored hashed and revocable; the env tokens stay for simple setups. |
 | 6 | Agent APIs behind reverse-proxy routes; hosts outside the LAN reach the API and NFS over a VPN, routes restricted to its range. |
 | 7 | Labels with a fixed `backtrack.` prefix; data path by convention with a label override; no named volumes in v1. |
 | 8 | No database dumps; databases use stop mode, with webhook hooks from labels (or global env) to silence alerts. A failed hook warns and the backup continues. |

@@ -154,18 +154,20 @@ class Hub:
         m = matches[0]["machine"]
         return m, self.call(m, "POST", f"/v1/stacks/{stack}/prerestore/remove", {"path": path})
 
-    def jobs(self) -> tuple[list[tuple[str, dict]], list[str]]:
+    def jobs(self, limit: int | None = 100, per_agent: int = 50,
+             machine: str | None = None) -> tuple[list[tuple[str, dict]], list[str]]:
+        """Recent jobs across online agents, newest first (`limit=None`: all), and the agents that didn't answer."""
         out, unreachable = [], []
         for a in self.agents():
-            if not a.get("online"):
+            if not a.get("online") or (machine and a["machine"] != machine):
                 continue
             try:
-                for j in self.call(a["machine"], "GET", "/v1/jobs").get("jobs", []):
+                for j in self.call(a["machine"], "GET", f"/v1/jobs?limit={per_agent}").get("jobs", []):
                     out.append((a["machine"], j))
             except AgentUnreachable:
                 unreachable.append(a["machine"])
         out.sort(key=lambda p: p[1].get("created") or 0, reverse=True)
-        return out[:100], unreachable
+        return out[:limit], unreachable
 
     def assign_lease(self, machine: str) -> None:
         if not any(a["machine"] == machine for a in self.agents()):

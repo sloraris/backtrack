@@ -117,6 +117,9 @@ svg { width: 18px; height: 18px; flex: none; }
 .bt-table th { font-size: 0.8rem; font-weight: 600; color: var(--muted); background: var(--surface-2); }
 .bt-table tbody tr:last-child td { border-bottom: 0; }
 .bt-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.bt-table .bt-table__check { width: 1%; padding-right: 0; }
+.bt-table__check input { width: 16px; height: 16px; margin: 0; vertical-align: middle; accent-color: var(--accent); }
+.bt-list { margin: 0; padding: 0 0 0 20px; display: flex; flex-direction: column; gap: 6px; }
 .bt-table__link { color: var(--link); text-decoration: none; }
 .bt-table__link:hover { text-decoration: underline; }
 

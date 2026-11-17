@@ -14,6 +14,8 @@ from backtrack.signing import sign
 
 # The first release whose agents answer POST /v1/backup-all.
 BACKUP_ALL_SINCE = (0, 3, 0)
+# The first release whose agents answer POST /v1/bulk/... An older agent must not get a stack list it would ignore.
+BULK_SINCE = (0, 4, 0)
 
 
 class AgentUnreachable(Exception):
@@ -167,6 +169,68 @@ class Hub:
             else:
                 started.append({"machine": m, "job": res["job"], "stacks": names})
         return {"started": started, "skipped": skipped}
+
+    # -- bulk actions on selected stacks ---------------------------------------------------------------------
+    BULK_ACTIONS = ("backup", "prerestore-remove")
+
+    def bulk_plan(self, action: str, stacks: list[str]) -> dict:
+        """Which agent gets which of the selected stacks, and which stacks are skipped and why. Calls no agent.
+
+        backup: each stack goes to the online agent that reports it. prerestore-remove: each stack goes to the
+        agents that hold a set-aside folder of it that is safe to remove. Stacks no agent can take (unknown,
+        nothing to remove, agent offline or older than 0.4.0) are skipped with the reason.
+        """
+        if action not in self.BULK_ACTIONS:
+            raise LookupError(f"no bulk action {action}")
+        groups: dict[str, list[str]] = {}
+        skipped: list[dict] = []
+        folders = self.prerestore() if action == "prerestore-remove" else []
+        for name in stacks:
+            if action == "backup":
+                found = self.find_stack(name)
+                if not found:
+                    skipped.append({"stack": name, "reason": "no agent reports it"})
+                    continue
+                machines = [found[1]["machine"]]
+            else:
+                mine = [f for f in folders if f["stack"] == name]
+                machines = sorted({f["machine"] for f in mine if f.get("removable")})
+                if not machines:
+                    skipped.append({"stack": name, "reason": "no set-aside folders" if not mine
+                                    else "no set-aside folder is safe to remove yet"})
+                    continue
+            for m in machines:
+                groups.setdefault(m, []).append(name)
+        ready: dict[str, list[str]] = {}
+        for m, names in sorted(groups.items()):
+            reason = self._bulk_blocker(m)
+            if reason:
+                skipped += [{"stack": n, "machine": m, "reason": reason} for n in names]
+            else:
+                ready[m] = names
+        return {"ready": ready, "skipped": skipped}
+
+    def bulk(self, action: str, stacks: list[str]) -> dict:
+        """Run a bulk action: one job per agent with its share of the stacks, agents in parallel."""
+        plan = self.bulk_plan(action, stacks)
+        started, skipped = [], plan["skipped"]
+        for m, names in plan["ready"].items():
+            try:
+                res = self.call(m, "POST", f"/v1/bulk/{action}", {"stacks": names})
+            except AgentUnreachable as e:
+                skipped += [{"stack": n, "machine": m, "reason": str(e)} for n in names]
+                continue
+            started.append({"machine": m, "job": res["job"], "stacks": names,
+                            **({"existing": True} if res.get("existing") else {})})
+        return {"started": started, "skipped": skipped}
+
+    def _bulk_blocker(self, machine: str) -> str | None:
+        a = self.agent(machine) or {}
+        if not a.get("online"):
+            return "agent offline"
+        if older_than(a.get("version"), BULK_SINCE):
+            return f"{machine} runs {a.get('version')}; bulk actions need 0.4.0 or later"
+        return None
 
     def restore(self, stack: str, snapshot: str) -> tuple[str, dict]:
         found = self.find_stack(stack)

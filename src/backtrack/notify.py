@@ -70,10 +70,10 @@ class Notifier:
                                          "step": step, "error": error, "detail": detail[-4000:]})
 
     def summary(self, failed: list[str], total: int, run: str = "nightly") -> None:
-        """One message for a run over every stack (`run` is nightly or backup-all), only when something failed."""
+        """One message for a run over every stack (`run`: nightly, backup-all or bulk-backup), only when something failed."""
         if not failed:
             return
-        label = "Nightly run" if run == "nightly" else "Back up all"
+        label = {"nightly": "Nightly run", "backup-all": "Back up all"}.get(run, "Bulk backup")
         msg = f"{label} on {self.machine}: {len(failed)} of {total} stacks failed: {', '.join(failed)}"
         if self.discord_url:
             post_json(self.discord_url, {"username": "Backtrack", "content": msg[:1900]})

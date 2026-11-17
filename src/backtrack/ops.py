@@ -162,10 +162,19 @@ class Agent:
         """
         return self._back_up_every_stack(job, "manual")
 
-    def _back_up_every_stack(self, job: Job, trigger: str) -> dict:
+    def backup_stacks(self, job: Job, names: list[str]) -> dict:
+        """The stacks in `names` one at a time, as Back up all does for every stack (a bulk backup from the hub)."""
+        return self._back_up_every_stack(job, "manual", names)
+
+    def _back_up_every_stack(self, job: Job, trigger: str, only: list[str] | None = None) -> dict:
         results: dict[str, dict] = {}
         with exclusive(self.cfg.state_dir, job):
             stacks = self.stacks()
+            if only is not None:
+                stacks = [s for s in stacks if s.name in only]
+                for name in sorted(set(only) - {s.name for s in stacks}):
+                    job.log(f"ERROR: {name}: no such stack on {self.cfg.machine}")
+                    results[name] = {"state": "failed", "error": f"no stack {name} on {self.cfg.machine}"}
             job.log(f"{len(stacks)} stacks: {', '.join(s.name for s in stacks) or 'none'}")
             for stack in stacks:
                 try:
@@ -178,7 +187,8 @@ class Agent:
                     results[stack.name] = {"state": "failed", "error": str(e)}
                     self.notifier.failure(stack.name, "backup", str(e), detail)
         failed = [n for n, r in results.items() if r["state"] != "ok"]
-        self.notifier.summary(failed, len(results), run="nightly" if trigger == "nightly" else "backup-all")
+        run = "nightly" if trigger == "nightly" else "backup-all" if only is None else "bulk-backup"
+        self.notifier.summary(failed, len(results), run=run)
         if trigger == "nightly":
             self.notifier.heartbeat(not failed, f"{len(results) - len(failed)}/{len(results)} stacks backed up"
                                     + (f"; failed: {', '.join(failed)}" if failed else ""))
@@ -418,6 +428,24 @@ class Agent:
                 job.log(f"kept {item['path']}: {e}")
                 kept.append(item["path"])
         return {"removed": removed, "kept": kept}
+
+    def remove_prerestore_stacks(self, job: Job, names: list[str]) -> dict:
+        """Remove the set-aside folders of these stacks that are safe to remove; keep the rest and say why."""
+        removed, kept, failed = [], [], []
+        items = [i for i in self.prerestore() if i["stack"] in names]
+        job.log(f"{len(items)} set-aside folders of {', '.join(sorted(set(names)))}")
+        for item in items:
+            if not item["removable"]:
+                job.log(f"kept {item['path']}: {item['reason']}")
+                kept.append({"path": item["path"], "reason": item["reason"]})
+                continue
+            try:
+                self.remove_prerestore(item["stack"], item["path"], job)
+                removed.append(item["path"])
+            except (OpError, OSError) as e:
+                job.log(f"ERROR: {item['path']}: {e}")
+                failed.append(item["path"])
+        return {"removed": removed, "kept": kept, "failed": failed}
 
     # -- verification and maintenance -----------------------------------------------------------------------
     def restore_test(self, job: Job, stack_name: str | None = None) -> dict:

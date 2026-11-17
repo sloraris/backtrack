@@ -165,7 +165,7 @@ def test_prerestore_through_hub_api(hub):
     aside = str(hub.appdata / "app.pre-restore")
 
     s, body = req(hub, "GET", "/api/v1/prerestore", headers={"Authorization": "Bearer read-tok"})
-    assert s == 200 and [(f["path"], f["machine"], f["state"]) for f in body["folders"]] == [(aside, "echo", "settling")]
+    assert s == 200 and [(f["path"], f["machine"], f["state"]) for f in body["folders"]] == [(aside, "alpha", "settling")]
     s, _ = req(hub, "POST", "/api/v1/stacks/app/prerestore/remove", {"path": aside, "confirm": "app"},
                headers={"Authorization": "Bearer read-tok"})
     assert s == 403
@@ -191,12 +191,12 @@ def test_prerestore_through_hub_api(hub):
 
 def test_stack_page_lists_set_aside_folders():
     from backtrack import ui
-    folder = {"path": "/opt/appdata/app.pre-restore", "stack": "app", "machine": "echo", "created": time.time(),
+    folder = {"path": "/opt/appdata/app.pre-restore", "stack": "app", "machine": "alpha", "created": time.time(),
               "size": 2048, "snapshot": "aaaa1111", "safety_snapshot": "bbbb2222", "state": "safe",
               "reason": "healthy", "removable": True}
     stack = {"name": "app", "mode": "stop", "path": "/opt/appdata/app", "containers": []}
-    html = ui.stack_page(stack, {"machine": "echo"}, [], "tok", [folder])
+    html = ui.stack_page(stack, {"machine": "alpha"}, [], "tok", [folder])
     assert "Set-aside folders" in html and 'action="/stacks/app/prerestore/remove"' in html
     assert 'value="/opt/appdata/app.pre-restore"' in html and "Safe to remove" in html
-    html = ui.stack_page(stack, {"machine": "echo"}, [], "tok", [{**folder, "state": "settling", "removable": False}])
+    html = ui.stack_page(stack, {"machine": "alpha"}, [], "tok", [{**folder, "state": "settling", "removable": False}])
     assert "prerestore/remove" not in html and "Settling" in html

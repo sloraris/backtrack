@@ -65,6 +65,12 @@ class Hub:
         if others:
             out.append(("warning", "MAINTENANCE=true is ignored", f"{', '.join(others)} also set MAINTENANCE=true, but "
                         f"{lease.machine if lease else 'no agent'} holds the lease."))
+        safe = [f for a in agents for f in a.get("prerestore") or [] if f.get("removable")]
+        if safe:
+            names = sorted({f["stack"] for f in safe})
+            out.append(("warning", f"{len(safe)} set-aside folder{'s' if len(safe) > 1 else ''} can be removed",
+                        f"{', '.join(names)}: the restore worked and the stack is healthy. Remove the old folder "
+                        "on the stack's page."))
         failed = [s["name"] for a in agents for s in a.get("stacks", []) if (s.get("last") or {}).get("state") == "failed"]
         if failed:
             out.insert(0, ("error", f"{len(failed)} stack{'s' if len(failed) > 1 else ''} failed the last backup",
@@ -128,6 +134,25 @@ class Hub:
         _, a = found
         self.invalidate_snapshots()
         return a["machine"], self.call(a["machine"], "POST", f"/v1/stacks/{stack}/restore", {"snapshot": snapshot})
+
+    def prerestore(self, stack: str | None = None) -> list[dict]:
+        """Set-aside folders across the fleet, from each agent's presence (the hub's own is live)."""
+        out = []
+        for a in self.agents():
+            for f in a.get("prerestore") or []:
+                if stack is None or f.get("stack") == stack:
+                    out.append({**f, "machine": a["machine"], "agent_online": bool(a.get("online"))})
+        return out
+
+    def remove_prerestore(self, stack: str, path: str, machine: str | None = None) -> tuple[str, dict]:
+        """Ask the agent that set the folder aside to remove it. It checks the stack's health again first."""
+        matches = [f for f in self.prerestore(stack) if f["path"] == path and (machine is None or f["machine"] == machine)]
+        if not matches:
+            raise LookupError(f"no agent reports a set-aside folder {path} for {stack}")
+        if len({f["machine"] for f in matches}) > 1:
+            raise LookupError(f"several agents have {path}; say which machine")
+        m = matches[0]["machine"]
+        return m, self.call(m, "POST", f"/v1/stacks/{stack}/prerestore/remove", {"path": path})
 
     def jobs(self) -> tuple[list[tuple[str, dict]], list[str]]:
         out, unreachable = [], []

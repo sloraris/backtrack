@@ -13,6 +13,7 @@ from backtrack.docker import Docker
 from backtrack.jobs import Job, JobRunner
 from backtrack.notify import Notifier
 from backtrack.ops import Agent
+from backtrack.prerestore import parse_duration
 from backtrack.restic import Restic
 from backtrack.schedule import next_run
 from backtrack.share import Share
@@ -52,6 +53,8 @@ class Service:
             "prune": a.prune,
             "monthly": a.monthly,
             "restore-test": lambda j: a.restore_test(j, stack),
+            "prerestore-remove": lambda j: a.remove_prerestore(stack, params["path"], j),
+            "prerestore-auto-remove": a.auto_remove_prerestore,
         }
         return self.runner.submit(kind, stack, fns[kind], params)
 
@@ -61,6 +64,12 @@ class Service:
 
     # -- loops ----------------------------------------------------------------------------------------------
     def start(self) -> None:
+        try:
+            n = self.agent.asides.adopt_history([j.to_dict() for j in self.runner.recent(10_000)])
+            if n:
+                log.info("recorded %d set-aside folder(s) from earlier restores", n)
+        except OSError as e:
+            log.warning("could not record earlier set-aside folders: %s", e)
         self.runner.start()
         self._compute_next()
         threading.Thread(target=self._schedule_loop, name="scheduler", daemon=True).start()
@@ -78,7 +87,13 @@ class Service:
         for name, key, kind in self.SCHEDULES:
             self.next_runs[name] = next_run(self.cfg.get(key), now, self.tz(), kind)
 
+    def _auto_remove_due(self) -> bool:
+        if not parse_duration(self.cfg.get("PRERESTORE_AUTO_REMOVE")) or self.busy_with("prerestore-auto-remove"):
+            return False
+        return any(item["removable"] for item in self.agent.prerestore())
+
     def _schedule_loop(self) -> None:
+        last_auto_remove = 0.0
         last_specs = {key: self.cfg.get(key) for _, key, _ in self.SCHEDULES} | {"TZ": self.cfg.get("TZ")}
         while not self._stop.wait(20):
             specs = {key: self.cfg.get(key) for _, key, _ in self.SCHEDULES} | {"TZ": self.cfg.get("TZ")}
@@ -95,6 +110,13 @@ class Service:
                         continue
                     log.info("scheduled %s", name)
                     self.submit(name)
+            if time.time() - last_auto_remove > 3600:
+                last_auto_remove = time.time()
+                try:
+                    if self._auto_remove_due():
+                        self.submit("prerestore-auto-remove")
+                except Exception as e:  # noqa: BLE001 - never let this stop the scheduler
+                    log.warning("set-aside folder check failed: %s", e)
 
     def _presence_loop(self) -> None:
         last_lease_check = 0.0

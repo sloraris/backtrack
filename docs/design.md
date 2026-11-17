@@ -166,7 +166,7 @@ just another `stop` stack: the agent talks to Docker directly.
 2. Safety snapshot of the current folder (`trigger=pre-restore`) while it is stopped, unless it has no files.
    If it fails, nothing has changed: the stack starts again and the restore is reported as failed.
 3. Rename `<path>` to `<path>.pre-restore`. An existing `.pre-restore` is first renamed to
-   `.pre-restore.<timestamp>`. Backtrack never deletes either.
+   `.pre-restore.<timestamp>`. Each set-aside folder is recorded (see [Set-aside folders](#set-aside-folders)).
 4. `restic restore <id>:<path> --target <path>`. The agent runs as root, so owners, groups and modes come back
    as recorded.
 5. Carry over excluded data: every literal path in `.backupignore` (no wildcards, no negations; a bare name at
@@ -176,6 +176,35 @@ just another `stop` stack: the agent talks to Docker directly.
 7. Start the containers that were running before (all of them if none existed), then post-start hooks.
 
 A failure after step 3 leaves the stack stopped, alerts, and logs how to roll back (rename `.pre-restore` back).
+
+## Set-aside folders
+
+Every folder a restore sets aside is recorded in `STATE_DIR/prerestore.json`: stack, path, the folder it came from,
+the restore job, the snapshot restored, the safety snapshot, whether the restore finished, and its size. A rotation
+updates the record's path. A record whose folder was removed by hand is dropped. On the first start after an
+upgrade, folders that earlier restores set aside are recorded from the job history.
+
+Agents put the list, with a verdict for each folder, in their presence file, so the hub shows it on the stack's page
+and warns when folders can be removed. A folder is **safe to remove** when:
+
+- the restore finished (files restored and post-restore ran; otherwise the folder is kept for a manual rollback),
+- every container of the stack is running, and those with a healthcheck report `healthy`,
+- each container has stayed up for `PRERESTORE_SETTLE` (default 5 min) since its last start, so a restart loop
+  never looks healthy, and that long has passed since the restore.
+
+A stack with no containers on the host (a files-only restore) needs only the settle time.
+
+Removing is a job on the agent that set the folder aside (hub button, `/api/v1`, or
+`backtrack prerestore remove`), confirmed by typing the stack name. The agent takes the host lock and then:
+
+1. accepts only a recorded path that matches `<folder>.pre-restore[.<timestamp>]` next to the folder it came
+   from, is a real directory, and belongs to the stack's current data folder;
+2. judges the stack again, now;
+3. checks that the safety snapshot is still in the repository, since it is the rollback once the folder is gone;
+4. deletes the folder and its record.
+
+Nothing is removed on its own unless `PRERESTORE_AUTO_REMOVE` is set (e.g. `7d`). Then, once an hour, folders
+older than that whose stack is safe are removed with the same checks.
 
 ## Auto-restore
 
@@ -265,13 +294,15 @@ dark setting.
   maintenance claims).
 - Stacks: all stacks across agents (machine, mode, last backup, size added, snapshot count). Back up now; Back
   up for migration.
-- Stack: snapshots from the repo (any machine), Restore with typed confirmation, job logs.
+- Stack: snapshots from the repo (any machine), Restore with typed confirmation, set-aside folders with their
+  verdict and a Remove button (typed confirmation) once safe, job logs.
 - Agent: settings (env-set ones locked), maintenance lease.
 
 ## APIs
 
 Agent API (hub only, signed): `GET /v1/status`, `GET /v1/stacks`, `GET /v1/stacks/{s}/snapshots`,
-`POST /v1/stacks/{s}/backup`, `POST /v1/stacks/{s}/restore`, `GET /v1/jobs/{id}`, `GET|PUT /v1/settings`.
+`POST /v1/stacks/{s}/backup`, `POST /v1/stacks/{s}/restore`, `GET /v1/jobs/{id}`, `GET|PUT /v1/settings`,
+`GET /v1/prerestore`, `POST /v1/stacks/{s}/prerestore/remove`.
 
 Hub API (bearer token or session), under `/api/v1`:
 
@@ -284,6 +315,8 @@ Hub API (bearer token or session), under `/api/v1`:
 | GET | `/jobs/{machine}/{id}` | read |
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
+| GET | `/prerestore` | read: set-aside folders, each with `state` (`settling`, `safe`, `unhealthy`, `failed`) |
+| POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>","machine":"…"}` | write; `machine` only when two agents have the path |
 
 Tether gets the read token and observes `/api/v1/status` and `/api/v1/stacks`.
 
@@ -345,6 +378,9 @@ pytest, with a real restic repo in a temp dir and a fake Docker client (records 
   stopped, retention override, hooks called and hook failure tolerated.
 - restore: safety snapshot, `.pre-restore` rename and rotation, owners and modes kept (CI runs as root),
   excluded-path carry-over, post-restore before start, failure leaves stack stopped.
+- set-aside folders: recorded on restore and rotation, verdicts (settling, safe, unhealthy, restart, failed
+  restore), removal refused while not safe, for unrecorded or tampered paths and without the safety snapshot,
+  auto-remove, adoption from job history.
 - auto-restore: every row of the table above, including the split-brain guard via a fake presence file.
 - migration: backup tagged on machine A, restore on B uses the same series and B's next backup uses A's
   snapshot as parent.
@@ -372,3 +408,4 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 13 | One maintenance agent via a lease on the share; the hub assigns it while active. |
 | 14 | Alerts: Discord and a generic JSON webhook; heartbeat to any push URL. |
 | 15 | One neutral UI theme (light/dark). The Orbit theme was dropped after v0.1.0 to keep Backtrack standalone. |
+| 16 | Set-aside folders are recorded and removed only on request (or opt-in auto-remove) once the stack is healthy and the safety snapshot exists. |

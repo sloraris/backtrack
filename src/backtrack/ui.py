@@ -45,6 +45,7 @@ TOASTS = {
     "restore": ("success", "Restore queued", "Follow it on the job page."),
     "saved": ("success", "Saved", "The agent uses the new value from now on."),
     "lease": ("success", "Maintenance agent changed", "Prune and repository checks now run there."),
+    "prerestore": ("success", "Removal queued", "The agent checks the stack's health again before it deletes."),
     "error": ("error", "That didn't work", ""),
 }
 
@@ -206,7 +207,45 @@ def stacks_page(agents: list[dict], snapshot_count: int | None, lease: dict | No
     return f'<main id="main" class="bt-page">{body}</main>'
 
 
-def stack_page(stack: dict, agent: dict, snapshots: list[dict], csrf: str) -> str:
+ASIDE_STATES = {"safe": ("Safe to remove", "up"), "settling": ("Settling", "maint"),
+                "unhealthy": ("Stack not healthy", "down"), "failed": ("Restore failed", "down")}
+
+
+def prerestore_section(name: str, folders: list[dict], csrf: str) -> str:
+    """Folders earlier restores set aside, each with its verdict and, when safe, a remove form."""
+    if not folders:
+        return ""
+    items = []
+    for f in folders:
+        word, kind = ASIDE_STATES.get(f.get("state") or "", ("Unknown", "maint"))
+        facts = " · ".join(x for x in (
+            f"set aside {ago(f.get('created'))}", size(f.get("size")) if f.get("size") is not None else "",
+            f"restored {f['snapshot']}" if f.get("snapshot") else "",
+            f"safety snapshot {f['safety_snapshot']}" if f.get("safety_snapshot") else "no safety snapshot",
+            f.get("machine") or "") if x)
+        if f.get("removable"):
+            control = (
+                f'<form class="bt-cluster bt-cluster--nowrap" method="post" action="/stacks/{u(name)}/prerestore/remove">'
+                f'<input type="hidden" name="csrf" value="{e(csrf)}">'
+                f'<input type="hidden" name="path" value="{e(f["path"])}">'
+                f'<input type="hidden" name="machine" value="{e(f.get("machine") or "")}">'
+                f'<input class="bt-input bt-input--mono" name="confirm" autocomplete="off" spellcheck="false" required '
+                f'pattern="{e(name)}" placeholder="Type {e(name)}" aria-label="Type {e(name)} to confirm">'
+                f'<button class="bt-btn bt-btn--danger bt-btn--sm" type="submit">Remove</button></form>')
+        else:
+            control = status(word, kind)
+        items.append(
+            f'<div class="bt-setting"><div class="bt-setting__text"><p class="bt-setting__title bt-code">{e(f["path"])}</p>'
+            f'<p class="bt-setting__desc">{e(facts)}</p><p class="bt-setting__desc">'
+            f'{status(word, kind) if f.get("removable") else ""} {e(f.get("reason") or "")}</p></div>'
+            f'<div class="bt-setting__control">{control}</div></div>')
+    return (f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div>'
+            f'<h2 class="bt-h2">Set-aside folders</h2><p class="bt-small bt-muted">What earlier restores replaced. '
+            f'Each can be removed once the restored stack has stayed healthy; its safety snapshot stays in the '
+            f'repository.</p></div></div><div class="bt-settings">{"".join(items)}</div></section>')
+
+
+def stack_page(stack: dict, agent: dict, snapshots: list[dict], csrf: str, folders: list[dict] | None = None) -> str:
     name = stack["name"]
     last = stack.get("last") or {}
     actions = (post_button(f"/stacks/{u(name)}/backup", "Back up for migration", csrf, fields={"trigger": "pre-migrate"})
@@ -234,7 +273,8 @@ def stack_page(stack: dict, agent: dict, snapshots: list[dict], csrf: str) -> st
         f'{" · before a restore" if s.get("trigger") == "pre-restore" else ""}</option>' for s in newest)
     restore = (
         f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">Restore</h2>'
-        f'<p class="bt-small bt-muted">Stops the stack, keeps the current folder as {e(name)}.pre-restore and starts it again.</p></div></div>'
+        f'<p class="bt-small bt-muted">Stops the stack, keeps the current folder as {e(name)}.pre-restore and starts it again. '
+        f'It shows under Set-aside folders until you remove it.</p></div></div>'
         f'<form class="bt-card" method="post" action="/stacks/{u(name)}/restore"><div class="bt-stack">'
         f'<input type="hidden" name="csrf" value="{e(csrf)}">'
         f'<label class="bt-field"><span class="bt-field__label">Snapshot</span><span class="bt-select">'
@@ -247,7 +287,8 @@ def stack_page(stack: dict, agent: dict, snapshots: list[dict], csrf: str) -> st
     body = (header(name, agent["machine"], actions=actions) + warn
             + f'<div class="bt-panel">{details}</div>'
             + f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">Snapshots</h2>'
-            + f'</div></div><div class="bt-card bt-card--flush">{snaps}</div></section>' + restore)
+            + f'</div></div><div class="bt-card bt-card--flush">{snaps}</div></section>'
+            + prerestore_section(name, folders or [], csrf) + restore)
     return f'<main id="main" class="bt-page">{body}</main>'
 
 

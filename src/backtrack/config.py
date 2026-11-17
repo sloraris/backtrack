@@ -42,6 +42,8 @@ DEFAULTS: dict[str, str] = {
     "STOP_TIMEOUT": "60",
     "PRESENCE_STALE_SECONDS": "180",
     "LEASE_STALE_DAYS": "8",
+    "PRERESTORE_SETTLE": "5m",
+    "PRERESTORE_AUTO_REMOVE": "",
     **{k: "" for k in SECRETS},
 }
 
@@ -157,6 +159,12 @@ class Config:
         for key in SETTABLE:
             if not VALIDATORS[key].match(self.get(key)):
                 raise ConfigError(f"invalid {key}: {self.get(key)!r}")
+        from backtrack.prerestore import parse_duration
+        for key in ("PRERESTORE_SETTLE", "PRERESTORE_AUTO_REMOVE"):
+            try:
+                parse_duration(self.get(key))
+            except ValueError as e:
+                raise ConfigError(f"{key}: {e}") from e
         if self.hub:
             for key in ("UI_PASSWORD", "CLUSTER_KEY"):
                 if not self.get(key):

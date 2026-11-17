@@ -9,7 +9,8 @@ of them write to one shared restic repository, and one of them can also serve a 
   a stack to another machine keeps its snapshots and its next backup stays incremental.
 - **Restores that are hard to get wrong.** Before a restore in place, Backtrack takes a safety snapshot and keeps
   the old folder as `<stack>.pre-restore`. Owners and modes come back as they were. Paths you excluded from
-  backups (like game worlds) stay where they were.
+  backups (like game worlds) stay where they were. The hub lists every folder a restore set aside and offers to
+  remove it once the stack has stayed healthy, so they don't pile up.
 - **Auto-restore for deploys.** Run `backtrack auto-restore <stack>` as a pre-deploy step: an empty or missing
   folder is filled from the latest snapshot. A stack with no snapshot starts fresh. An unreachable repository
   fails the deploy, so a stack never quietly starts empty.
@@ -92,6 +93,8 @@ them, and are saved on that agent.
 | `DISCORD_WEBHOOK_URL`, `ALERT_WEBHOOK_URL` | | Failure alerts. |
 | `HEARTBEAT_URL` | | Called with `status=up\|down&msg=…` after every nightly run. |
 | `HOOK_PRE_STOP_URL`, `HOOK_POST_START_URL` | | Stop hooks for every stack. |
+| `PRERESTORE_SETTLE` | `5m` | How long a restored stack must stay running and healthy before its set-aside folder can be removed. |
+| `PRERESTORE_AUTO_REMOVE` | off | e.g. `7d`: remove set-aside folders that old once their stack is healthy. Off means only on request. |
 
 ## Command line
 
@@ -102,6 +105,8 @@ docker exec -it backtrack backtrack restore myapp            # --snapshot <id>; 
 docker exec backtrack backtrack auto-restore myapp           # exit 0: restored, had data, or starts fresh
 docker exec backtrack backtrack snapshots myapp
 docker exec backtrack backtrack restore-test
+docker exec backtrack backtrack prerestore list              # folders restores set aside, and whether they're safe
+docker exec -it backtrack backtrack prerestore remove myapp  # removes the stack's safe ones; --path for one
 ```
 
 Commands and the scheduler share a lock, so two jobs never run at once on one host.
@@ -119,7 +124,8 @@ Commands and the scheduler share a lock, so two jobs never run at once on one ho
 `/api/v1` on the hub, with `Authorization: Bearer <READ_TOKEN|WRITE_TOKEN>`:
 `GET /status`, `GET /agents`, `GET /stacks`, `GET /stacks/{stack}/snapshots`, `GET /jobs/{machine}/{id}`,
 `POST /stacks/{stack}/backup` (`{"trigger":"manual"|"pre-migrate"}`) and
-`POST /stacks/{stack}/restore` (`{"snapshot":"latest"|ID,"confirm":"<stack>"}`). `/healthz` needs no token.
+`POST /stacks/{stack}/restore` (`{"snapshot":"latest"|ID,"confirm":"<stack>"}`), `GET /prerestore` and
+`POST /stacks/{stack}/prerestore/remove` (`{"path":"…","confirm":"<stack>"}`). `/healthz` needs no token.
 
 ## Development
 

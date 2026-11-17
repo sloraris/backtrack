@@ -15,6 +15,7 @@ from backtrack.config import Config
 from backtrack.docker import DockerClient, DockerError
 from backtrack.jobs import Job, exclusive
 from backtrack.notify import Notifier, call_hooks
+from backtrack.prerestore import Aside, Registry, Verdict, folder_size, is_aside_of, judge, parse_duration
 from backtrack.restic import Restic, ResticError, Snapshot
 from backtrack.share import Share
 from backtrack.stacks import (IGNORE_FILE, NAME_RE, Stack, discover, has_files, literal_ignores, literal_matches,
@@ -34,6 +35,8 @@ class Agent:
         self.restic = restic
         self.share = share
         self.notifier = notifier
+        self.asides = Registry(cfg.state_dir)
+        self.clock = time.time
 
     # -- discovery ------------------------------------------------------------------------------------------
     def stacks(self) -> list[Stack]:
@@ -213,14 +216,14 @@ class Agent:
             os.rename(src, dst)
             job.log(f"kept excluded {rel} from the previous folder")
 
-    @staticmethod
-    def _set_aside(path: Path, job: Job) -> Path | None:
+    def _set_aside(self, path: Path, job: Job) -> Path | None:
         if not (path.exists() or path.is_symlink()):
             return None
         aside = path.with_name(path.name + ".pre-restore")
         if aside.exists() or aside.is_symlink():
             older = aside.with_name(aside.name + "." + datetime.now().strftime("%Y%m%dT%H%M%S"))
             os.rename(aside, older)
+            self.asides.moved(str(aside), str(older))
             job.log(f"renamed the previous {aside.name} to {older.name}")
         os.rename(path, aside)
         job.log(f"renamed {path} to {aside.name}")
@@ -257,12 +260,19 @@ class Agent:
             aside = None
             try:
                 aside = self._set_aside(target, job)
+                if aside:
+                    self.asides.add(Aside(stack=name, path=str(aside), target=str(target), created=self.clock(),
+                                          job=job.id, snapshot=snap.short_id,
+                                          safety_snapshot=safety.short_id if safety else None))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 self.restic.restore(snap, target)
                 job.log("files restored")
                 if aside:
                     self._carry_over(aside, target, job)
                 self._post_restore(name, stack.post_restore, target, snap, job)
+                if aside:
+                    self.asides.update(str(aside), restore_ok=True, restored_at=self.clock(),
+                                       size=folder_size(aside))
             except Exception as e:
                 hint = (f"The stack is left stopped. To roll back: remove {target} and rename {aside} to "
                         f"{target.name}, then start the stack." if aside else "The stack is left stopped.")
@@ -317,6 +327,86 @@ class Agent:
                 return 1
             job.log("restored")
             return 0
+
+    # -- set-aside folders ----------------------------------------------------------------------------------
+    @property
+    def settle(self) -> int:
+        return parse_duration(self.cfg.get("PRERESTORE_SETTLE"))
+
+    def _judge(self, aside: Aside, stacks: list[Stack] | None = None) -> Verdict:
+        stacks = self.stacks() if stacks is None else stacks
+        stack = next((s for s in stacks if s.name == aside.stack), None)
+        return judge(aside, stack.containers if stack else None, self.docker, self.settle, self.clock())
+
+    def prerestore(self, stacks: list[Stack] | None = None) -> list[dict]:
+        """Every recorded set-aside folder with its verdict, for presence and the API."""
+        items = self.asides.all()
+        if not items:
+            return []
+        docker_error = None
+        if stacks is None:
+            try:
+                stacks = self.stacks()
+            except DockerError as e:
+                stacks, docker_error = [], str(e)
+        out = []
+        for a in items:
+            v = (Verdict("unhealthy", f"Can't check the stack: {docker_error}") if docker_error
+                 else self._judge(a, stacks))
+            out.append({**a.to_dict(), "state": v.state, "reason": v.reason, "removable": v.removable,
+                        "containers": v.containers})
+        return out
+
+    def remove_prerestore(self, name: str, path: str, job: Job) -> dict:
+        """Delete one recorded set-aside folder, after checking again that the stack is healthy."""
+        with exclusive(self.cfg.state_dir, job):
+            aside = self.asides.get(path)
+            if aside is None or aside.stack != name:
+                raise OpError(f"{path} is not a folder Backtrack set aside for {name}")
+            folder = Path(aside.path)
+            if not is_aside_of(folder, Path(aside.target)) or folder.is_symlink() or not folder.is_dir():
+                raise OpError(f"refusing to remove {folder}: not a set-aside folder of {aside.target}")
+            stack = self.find(name)
+            if stack and stack.path and Path(aside.target) != stack.path:
+                raise OpError(f"{folder} belongs to {aside.target}, but {name} now keeps its data in {stack.path}")
+            verdict = self._judge(aside)
+            if not verdict.removable:
+                raise OpError(f"{name} isn't healthy yet: {verdict.reason}")
+            if aside.safety_snapshot:
+                try:
+                    self.restic.snapshot(aside.safety_snapshot)
+                except ResticError as e:
+                    if "not found" not in str(e):
+                        raise OpError(f"can't read the repository to check the safety snapshot: {e}", e.tail) from e
+                    raise OpError(f"the safety snapshot {aside.safety_snapshot} is missing, so this folder is the "
+                                  "only copy of the state before the restore; keeping it") from e
+                job.log(f"safety snapshot {aside.safety_snapshot} is in the repository")
+            job.log(f"{name} is healthy: {verdict.reason}")
+            job.log(f"removing {folder}")
+            shutil.rmtree(folder)
+            self.asides.remove(aside.path)
+            job.log("removed")
+        return {"removed": str(folder), "size": aside.size}
+
+    def auto_remove_prerestore(self, job: Job) -> dict:
+        """PRERESTORE_AUTO_REMOVE: remove folders older than that whose stack is healthy."""
+        after = parse_duration(self.cfg.get("PRERESTORE_AUTO_REMOVE"))
+        removed, kept = [], []
+        if not after:
+            return {"removed": removed}
+        for item in self.prerestore():
+            if self.clock() - (item["restored_at"] or item["created"]) < after:
+                continue
+            if not item["removable"]:
+                kept.append(item["path"])
+                continue
+            try:
+                self.remove_prerestore(item["stack"], item["path"], job)
+                removed.append(item["path"])
+            except OpError as e:
+                job.log(f"kept {item['path']}: {e}")
+                kept.append(item["path"])
+        return {"removed": removed, "kept": kept}
 
     # -- verification and maintenance -----------------------------------------------------------------------
     def restore_test(self, job: Job, stack_name: str | None = None) -> dict:
@@ -421,14 +511,14 @@ class Agent:
             stack_list = [s.to_dict() for s in stacks]
             docker_error = None
         except DockerError as e:
-            stack_list, docker_error = [], str(e)
+            stacks, stack_list, docker_error = [], [], str(e)
         last = last or {}
         for s in stack_list:
             s["last"] = last.get(s["name"])
         lease = self.share.lease()
         return {
             "version": __version__, "url": self.cfg.get("AGENT_URL"), "hub": self.cfg.hub,
-            "stacks": stack_list, "docker_error": docker_error,
+            "stacks": stack_list, "docker_error": docker_error, "prerestore": self.prerestore(None if docker_error else stacks),
             "job": current.to_dict() if current else None,
             "last_nightly": last_nightly.to_dict() if last_nightly else None,
             "maintenance": {"wants": self.cfg.maintenance, "locked": self.cfg.locked("MAINTENANCE"),

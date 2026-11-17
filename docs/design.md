@@ -4,7 +4,7 @@ Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one
 write to one shared restic repo. One agent can also run the hub: a web UI and API for the whole fleet. Agents
 never depend on the hub, the management plane (Komodo, Portainer, ...) or each other to back up and restore.
 
-Status: **v2, approved by Parker (2026-11-15); implemented in v0.1.0, fixed after a real-host test in v0.1.1**. Decisions are recorded in [Decisions](#decisions).
+Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1**. Decisions are recorded in [Decisions](#decisions).
 
 ## Project
 
@@ -13,14 +13,14 @@ Status: **v2, approved by Parker (2026-11-15); implemented in v0.1.0, fixed afte
 - Python 3.13, **standard library only** at runtime, on `python:3.13-slim` with a pinned restic binary copied
   from the official `restic/restic` image. restic does the heavy lifting; the agent is glue (restic, the Docker
   socket, a scheduler, a small HTTP server). No runtime dependencies to keep updated. Image about 60 MB.
-- Generic: nothing in the code knows about orbit, Pelican or Komodo. Lab specifics are labels and env in the
-  deploying repo. Orbit is the first user and the examples come from it.
+- Generic: nothing in the code knows about any particular deployment, app or management plane. Site specifics
+  are labels and env in the deploying repo.
 - Dev and CI: `pytest` against a real local restic repo.
 
 ## Architecture
 
 ```
-            browser, Tether (read token), scripts (write token)
+         browser, dashboards (read token), scripts (write token)
                                |
               backtrack.example (Traefik)  -> agent on host A, HUB=true
                                |   cluster-key signed calls
@@ -47,12 +47,12 @@ Status: **v2, approved by Parker (2026-11-15); implemented in v0.1.0, fixed afte
     body; 60 s clock skew allowed, nonces remembered for that window). Agents accept nothing else over HTTP.
   - People to hub: one admin password (`UI_PASSWORD`), session cookie (HttpOnly, Secure, SameSite=Strict, 12 h),
     CSRF tokens, rate-limited login.
-  - Programs to hub: bearer tokens with a scope. `READ_TOKEN` (status, stacks, snapshots, jobs; for Tether) and
+  - Programs to hub: bearer tokens with a scope. `READ_TOKEN` (status, stacks, snapshots, jobs; for dashboards and monitoring) and
     `WRITE_TOKEN` (also backup and restore; for scripts). Each is compared in constant time and none works as
     another.
-- **Network:** each agent's API is reached at its own route (`backup-<host>.example`). In orbit that is the
-  host's Traefik on home hosts, and on Void a Pangolin resource restricted to the mesh VPN range. The hub is
-  `backtrack.voidshift.dev`, LAN-only. `/healthz` needs no auth.
+- **Network:** each agent's API is reached at its own route (`backup-<host>.example`), for example through the
+  host's reverse proxy. A host outside the LAN can be reached over a VPN, with its route restricted to the VPN's
+  range. Keep the hub off the public internet. `/healthz` needs no auth.
 
 ## Configuration
 
@@ -145,7 +145,7 @@ Hook body: `{"event":"pre-stop"|"post-start","stack":..,"machine":..,"trigger":.
 "ok":true|false}`. 10 s timeout, one retry.
 
 The management plane did not ask for these stops. Keep them short, and use the hooks to silence alerts that
-would fire (for example Grafana silences, Kuma maintenance). Backing up the management plane itself (Komodo) is
+would fire (for example Alertmanager silences, Uptime Kuma maintenance). Backing up the management plane itself is
 just another `stop` stack: the agent talks to Docker directly.
 
 ## Schedule and jobs
@@ -171,7 +171,7 @@ just another `stop` stack: the agent talks to Docker directly.
    as recorded.
 5. Carry over excluded data: every literal path in `.backupignore` (no wildcards, no negations; a bare name at
    any depth) that exists in `.pre-restore` and not in the restored folder is moved across. This keeps data that was never in the
-   snapshot (Pelican's game volumes) where the stack expects it.
+   snapshot (large game worlds, media caches) where the stack expects it.
 6. Run `backtrack.post-restore`, if set (see [Host commands](#host-commands)).
 7. Start the containers that were running before (all of them if none existed), then post-start hooks.
 
@@ -222,11 +222,11 @@ older than that whose stack is safe are removed with the same checks.
 "Empty" means no files: a tree of empty folders (left by a `mkdir -p` in a pre-deploy step) still counts as empty.
 The stack's `backtrack.post-restore` runs only when its containers already exist (a redeploy); on a host that has
 never run the stack the labels can't be read yet, so chain the setup in the pre-deploy step instead
-(`docker exec backtrack backtrack auto-restore pelican && bash pelican_setup.sh`).
+(`docker exec backtrack backtrack auto-restore myapp && bash setup.sh`).
 
 Failing closed is deliberate: a fresh start on top of a failed restore creates new state and a new "latest"
-that hides the real one. The agent must be deployed on a host before the stacks that use auto-restore. In orbit
-the pre-deploy is `docker exec backtrack backtrack auto-restore <stack>`. Restoring the management plane on a
+that hides the real one. The agent must be deployed on a host before the stacks that use auto-restore. The
+pre-deploy step is `docker exec backtrack backtrack auto-restore <stack>`. Restoring the management plane on a
 fresh host is the same command over SSH, then `docker compose up -d`.
 
 ## Migration
@@ -236,7 +236,7 @@ Moving a stack from host A to B:
 1. Hub: "Back up for migration" on A: a normal stop-mode backup tagged `trigger=pre-migrate`; the stack starts
    again afterwards. Backtrack does not leave it stopped, since the management plane would see it as unhealthy.
 2. Stop or remove the stack on A through the management plane.
-3. Point the stack at B (in orbit: `server` in `stacks.toml`) and deploy. B's auto-restore finds no folder and
+3. Point the stack at B in the management plane and deploy. B's auto-restore finds no folder and
    restores the pre-migrate snapshot. If A's agent still reports the stack running, auto-restore refuses and
    the deploy fails, so the stack never runs on two hosts with diverging data.
 
@@ -251,10 +251,11 @@ container from its own image (`--privileged --pid=host --rm`) running
 already reach the Docker socket. Output goes to the job log; a non-zero exit fails the restore before the stack
 starts.
 
-Orbit's Pelican uses it to redo its bind mounts, which still point at the renamed folder after a restore:
+For example, a stack whose host-side bind mounts still point at the renamed folder after a restore can redo
+them:
 
 ```yaml
-- backtrack.post-restore=umount /etc/pelican /var/lib/pelican /var/log/pelican 2>/dev/null; bash /etc/komodo/repos/orbit/stacks/pelican/pelican_setup.sh
+- backtrack.post-restore=umount /etc/myapp /var/lib/myapp 2>/dev/null; bash /srv/myapp/setup.sh
 ```
 
 ## Maintenance
@@ -318,9 +319,9 @@ Hub API (bearer token or session), under `/api/v1`:
 | GET | `/prerestore` | read: set-aside folders, each with `state` (`settling`, `safe`, `unhealthy`, `failed`) |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>","machine":"…"}` | write; `machine` only when two agents have the path |
 
-Tether gets the read token and observes `/api/v1/status` and `/api/v1/stacks`.
+A dashboard or monitor needs only the read token, for `/api/v1/status` and `/api/v1/stacks`.
 
-## Deploying (orbit, later)
+## Deploying
 
 `examples/compose.yaml` in the repo shows an agent, and `examples/compose.hub.yaml` the hub agent:
 
@@ -332,9 +333,9 @@ services:
     container_name: backtrack
     restart: unless-stopped
     environment:
-      MACHINE: echo
-      AGENT_URL: https://backup-echo.voidshift.dev
-      TZ: America/Boise
+      MACHINE: alpha
+      AGENT_URL: https://backup-alpha.example.com
+      TZ: Etc/UTC
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
       CLUSTER_KEY: ${CLUSTER_KEY}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
@@ -348,21 +349,20 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/appdata:/opt/appdata
       - /opt/cache/backtrack:/opt/cache/backtrack
-      - dawn:/share
-    labels: [Traefik labels: backup-echo.voidshift.dev for the agent API, backtrack.voidshift.dev for the hub]
+      - nas:/share
+    labels: [reverse proxy labels: backup-alpha.example.com for the agent API, backtrack.example.com for the hub]
     networks: [traefik]
 volumes:
-  dawn:            # a mount definition, not stored state
+  nas:             # a mount definition, not stored state
     driver: local
     driver_opts:
       type: nfs
-      o: addr=<dawn-ip>,nfsvers=4.1,hard,timeo=600
+      o: addr=<nas-ip>,nfsvers=4.1,hard,timeo=600
       device: ":<export-path>"
 ```
 
-Lab-side work for later: Void reaches Dawn over the mesh VPN (allow NFS and agent traffic on the tunnel), the
-Void agent's Pangolin resource restricted to the mesh range, a Kuma push monitor per host, DNS for the hub, and
-the hub and agent routes on the CrowdSec home-only list.
+Around the deployment: every host must reach the NAS over NFS and the hub must reach every agent's route (a host
+outside the LAN can do both over a VPN), one heartbeat monitor per host, and DNS for the hub and agent routes.
 
 ### NFS and root squash
 
@@ -395,10 +395,10 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 |---|---|
 | 1 | Public, generic, MIT; repo/image/CLI named `backtrack`. |
 | 2 | Python 3.13 stdlib only, restic binary in the image. |
-| 3 | Agent everywhere; hub is a mode of the same image, on one agent. Tether only observes. |
+| 3 | Agent everywhere; hub is a mode of the same image, on one agent. Outside tools only observe, with the read token. |
 | 4 | Discovery by presence files on the shared share. |
 | 5 | Hub to agent signed with a cluster key; hub tokens scoped read/write; no per-agent tokens. |
-| 6 | Agent APIs behind Traefik routes; Void's via Pangolin restricted to the mesh range. Void uses NFS over the mesh VPN. |
+| 6 | Agent APIs behind reverse-proxy routes; hosts outside the LAN reach the API and NFS over a VPN, routes restricted to its range. |
 | 7 | Labels with a fixed `backtrack.` prefix; data path by convention with a label override; no named volumes in v1. |
 | 8 | No database dumps; databases use stop mode, with webhook hooks from labels (or global env) to silence alerts. A failed hook warns and the backup continues. |
 | 9 | Restore in place takes a safety snapshot first and carries excluded literal paths over from `.pre-restore`. |
@@ -407,5 +407,5 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 12 | Settings: env locks, UI fills the gaps, saved per agent. |
 | 13 | One maintenance agent via a lease on the share; the hub assigns it while active. |
 | 14 | Alerts: Discord and a generic JSON webhook; heartbeat to any push URL. |
-| 15 | One neutral UI theme (light/dark). The Orbit theme was dropped after v0.1.0 to keep Backtrack standalone. |
+| 15 | One neutral UI theme (light/dark). The original theme was dropped after v0.1.0 to keep Backtrack standalone. |
 | 16 | Set-aside folders are recorded and removed only on request (or opt-in auto-remove) once the stack is healthy and the safety snapshot exists. |

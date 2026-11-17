@@ -57,7 +57,7 @@ def wait_job(lab, job_id, timeout=60):
 
 
 def test_healthz_needs_no_auth(hub):
-    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.2.0"})
+    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.2.1"})
 
 
 def test_agent_api_requires_signature(hub):
@@ -200,3 +200,13 @@ def test_stack_page_lists_set_aside_folders():
     assert 'value="/opt/appdata/app.pre-restore"' in html and "Safe to remove" in html
     html = ui.stack_page(stack, {"machine": "alpha"}, [], "tok", [{**folder, "state": "settling", "removable": False}])
     assert "prerestore/remove" not in html and "Settling" in html
+
+
+def test_static_urls_carry_a_content_hash(hub):
+    from backtrack import ui
+    html = ui.login()
+    for name in ("mark.svg", "favicon.svg", "style.css"):
+        url = ui.static(name)
+        assert url.startswith(f"/static/{name}?v=") and len(url.split("=")[1]) == 10 and url in html
+        with urllib.request.urlopen(hub.base + url, timeout=10) as r:  # the server ignores the query
+            assert r.status == 200

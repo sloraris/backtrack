@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
+from functools import cache
 from html import escape
+from importlib import resources
 from urllib.parse import quote
+
+@cache
+def static(name: str) -> str:
+    """URL of a file in static/, with a hash of its content so browsers fetch it again after an upgrade.
+
+    The server tells browsers to cache static files for a day; without the hash, a new release would show
+    the new pages with yesterday's stylesheet and logo.
+    """
+    try:
+        digest = hashlib.sha256((resources.files("backtrack") / "static" / name).read_bytes()).hexdigest()[:10]
+    except FileNotFoundError:
+        return f"/static/{name}"
+    return f"/static/{name}?v={digest}"
+
 
 def e(v) -> str:
     return escape("" if v is None else str(v), quote=True)
@@ -106,7 +123,7 @@ def toast(key: str | None, detail: str = "") -> str:
 def head(title: str) -> str:
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)} · Backtrack</title>'
-            '<link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/style.css"></head>')
+            f'<link rel="icon" href="{static("favicon.svg")}"><link rel="stylesheet" href="{static("style.css")}"></head>')
 
 
 def page(title: str, current: str, body: str, csrf: str, toast_html: str = "", alerts: int = 0) -> str:
@@ -116,7 +133,7 @@ def page(title: str, current: str, body: str, csrf: str, toast_html: str = "", a
         items.append(f'<a class="bt-nav__item" href="{href}"{cur}>{ICONS[icon]}<span>{label}</span></a>')
     signout = (f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{e(csrf)}">'
                f'<button class="bt-nav__item" type="submit">{ICONS["log-out"]}<span>Sign out</span></button></form>')
-    brand = '<a class="bt-brand" href="/"><img src="/static/mark.svg" alt=""><span>backtrack</span></a>'
+    brand = f'<a class="bt-brand" href="/"><img src="{static("mark.svg")}" alt=""><span>backtrack</span></a>'
     badge = f'<span class="bt-badge">{alerts}</span>' if alerts else ""
     menu_label = f"Open menu, {alerts} alerts" if alerts else "Open menu"
     return (
@@ -133,7 +150,7 @@ def page(title: str, current: str, body: str, csrf: str, toast_html: str = "", a
         + f'<div class="bt-mobilenav__menu" id="bt-menu" popover><div class="bt-mobilenav__bar">{brand}'
         + f'<button class="bt-btn bt-btn--ghost bt-btn--icon" type="button" popovertarget="bt-menu" '
         + f'popovertargetaction="hide" aria-label="Close menu">{ICONS["x"]}</button></div><div class="bt-nav">{"".join(items)}{signout}</div></div></nav>'
-        + f'</div>{toast_html}<script src="/static/app.js" defer></script></body></html>'
+        + f'</div>{toast_html}<script src="{static("app.js")}" defer></script></body></html>'
     )
 
 
@@ -158,7 +175,7 @@ def login(error: str = "") -> str:
     err = (f'<p class="bt-field__help">{e(error)}</p>' if error else "")
     cls = "bt-field bt-field--error" if error else "bt-field"
     return (head("Sign in") + '<body class="bt-body"><main id="main" class="bt-center"><div class="bt-card">'
-            '<div class="bt-stack bt-stack--group"><img class="bt-login__mark" src="/static/mark.svg" alt="">'
+            f'<div class="bt-stack bt-stack--group"><img class="bt-login__mark" src="{static("mark.svg")}" alt="">'
             '<h1 class="bt-h1">Sign in to Backtrack</h1>'
             '<form class="bt-stack" method="post" action="/login">'
             f'<label class="{cls}"><span class="bt-field__label">Admin password</span>'

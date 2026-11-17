@@ -159,6 +159,16 @@ def test_backup_all_is_tagged_manual_and_skips_the_heartbeat(lab):
     assert [f[0] for f in lab.notifier.failures] == ["b"]
 
 
+def test_backup_stacks_only_backs_up_the_named_ones(lab):
+    for name in ("a", "c"):
+        lab.stack_dir(name)
+        lab.docker.add(name, "web", {L_MODE: "live"})
+    result = lab.agent.backup_stacks(lab.job("bulk-backup"), ["c", "gone"])
+    assert sorted(result["stacks"]) == ["c", "gone"] and result["failed"] == ["gone"]
+    assert lab.restic.latest("a") is None and lab.restic.latest("c").tag("trigger") == "manual"
+    assert lab.notifier.summaries == [(["gone"], 2, "bulk-backup")] and lab.notifier.heartbeats == []
+
+
 def test_misconfigured_stack_is_reported(lab):
     lab.stack_dir("app")
     lab.docker.add("app", "web", {L_MODE: "stop"})

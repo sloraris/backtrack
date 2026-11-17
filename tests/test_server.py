@@ -57,7 +57,7 @@ def wait_job(lab, job_id, timeout=60):
 
 
 def test_healthz_needs_no_auth(hub):
-    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.3.0"})
+    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.4.0"})
 
 
 def test_agent_api_requires_signature(hub):
@@ -139,13 +139,23 @@ def test_ui_login_csrf_and_pages(hub):
     csrf = html.split('name="csrf" value="')[1].split('"')[0]
     for path in ("/stacks/app", "/agents", "/agents/alpha", "/jobs", "/repository"):
         assert get(path)[0] == 200, path
-    assert "Back up all" in html and "Stops while backed up" in html and "Back up 1 stack<" in html
+    assert 'name="stack" value="app" form="bt-bulk"' in html and "Back up selected" in html
+    assert "Back up all" not in html  # select-all replaces the overview's button
+    _, _, review = get("/bulk?action=backup&stack=app")
+    assert "Stops while backed up: <span class=\"bt-code\">app</span>" in review and "Back up 1 stack<" in review
+    assert "done=error" in get("/bulk?action=backup")[1]  # nothing selected
     assert 'name="machine" value="alpha"' in get("/agents/alpha")[2]  # the agent page's own button
     assert post("/stacks/app/backup", {"trigger": "manual"})[0] == 403  # no CSRF token
     status, url, html = post("/stacks/app/backup", {"trigger": "manual", "csrf": csrf})
     assert status == 200 and "/jobs/alpha/" in url and "Backup queued" in html
     status, url, html = post("/backup-all", {"csrf": csrf})
     assert status == 200 and "/jobs/alpha/" in url and "Back up all queued" in html
+    wait_job(hub, url.split("/jobs/alpha/")[1].split("?")[0])
+    status, url, html = post("/bulk/backup", [("stack", "app"), ("csrf", csrf)])
+    assert status == 200 and "/jobs/alpha/" in url and "Backups queued" in html
+    wait_job(hub, url.split("/jobs/alpha/")[1].split("?")[0])
+    status, url, html = post("/bulk/prerestore-remove", [("stack", "app"), ("csrf", csrf), ("confirm", "remove")])
+    assert "done=error" in url and "Nothing started" in html and "no set-aside folders" in html
     status, url, html = post("/agents/alpha/settings", {"KEEP": "daily=9", "csrf": csrf})
     assert "done=saved" in url and hub.cfg.get("KEEP") == "daily=9"
     status, url, _ = post("/repository/lease", {"machine": "alpha", "csrf": csrf})
@@ -305,7 +315,7 @@ def test_hub_backup_all_skips_agents_it_cannot_use(hub):
 
     stack = [{"name": "app", "mode": "stop"}]
     fleet = [
-        {"machine": "alpha", "online": True, "version": "0.3.0", "stacks": stack},
+        {"machine": "alpha", "online": True, "version": "0.4.0", "stacks": stack},
         {"machine": "beta", "online": False, "version": "0.3.0", "stacks": stack},
         {"machine": "gamma", "online": True, "version": "0.3.0", "stacks": []},
         {"machine": "delta", "online": True, "version": "0.2.2", "stacks": stack},
@@ -352,3 +362,121 @@ def test_backup_all_panel_names_the_stacks_that_stop():
     one = ui.backup_all(agents, "tok", "beta")
     assert "every stack on beta" in one and 'name="machine" value="beta"' in one and "db" not in one
     assert ui.backup_all(agents, "tok", "gamma") == ""  # offline: no button
+
+
+def test_bulk_backup_through_hub_api(hub):
+    hub.stack_dir("db", {"f": "2"})
+    hub.docker.add("db", "main", {L_MODE: "live"})
+    auth = {"Authorization": "Bearer write-tok"}
+    assert req(hub, "POST", "/api/v1/bulk/backup", {"stacks": ["app"]},
+               headers={"Authorization": "Bearer read-tok"})[0] == 403
+    for bad in ({}, {"stacks": []}, {"stacks": "app"}, {"stacks": ["../x"]}):
+        assert req(hub, "POST", "/api/v1/bulk/backup", bad, headers=auth)[0] == 400, bad
+    s, body = req(hub, "POST", "/api/v1/bulk/backup", {"stacks": ["db", "app", "app", "ghost"]}, headers=auth)
+    assert s == 202 and body["skipped"] == [{"stack": "ghost", "reason": "no agent reports it"}]
+    [started] = body["started"]
+    assert started["machine"] == "alpha" and started["stacks"] == ["app", "db"]
+    job = wait_job(hub, started["job"]["id"])
+    assert job.kind == "bulk-backup" and job.state == "ok" and sorted(job.result["stacks"]) == ["app", "db"]
+    assert hub.restic.latest("app").tag("trigger") == "manual" and hub.notifier.heartbeats == []
+    s, detail = req(hub, "GET", "/api/v1/stacks/db", headers=auth)
+    assert detail["last"]["state"] == "ok"
+    s, body = req(hub, "POST", "/api/v1/bulk/backup", {"stacks": ["ghost"]}, headers=auth)
+    assert s == 409 and "ghost" in body["error"] and body["started"] == []
+
+
+def test_bulk_prerestore_remove_through_hub_api(hub):
+    auth = {"Authorization": "Bearer write-tok"}
+    s, body = req(hub, "POST", "/api/v1/stacks/app/backup", {"trigger": "manual"}, headers=auth)
+    wait_job(hub, body["job"]["id"])
+    s, body = req(hub, "POST", "/api/v1/stacks/app/restore", {"snapshot": "latest", "confirm": "app"}, headers=auth)
+    wait_job(hub, body["job"]["id"])
+    aside = hub.appdata / "app.pre-restore"
+
+    s, err = req(hub, "POST", "/api/v1/bulk/prerestore-remove", {"stacks": ["app"]}, headers=auth)
+    assert s == 400 and '"remove"' in err["error"]
+    s, body = req(hub, "POST", "/api/v1/bulk/prerestore-remove", {"stacks": ["app"], "confirm": "remove"},
+                  headers=auth)
+    assert s == 409 and body["skipped"] == [{"stack": "app", "reason": "no set-aside folder is safe to remove yet"}]
+
+    hub.agent.clock = lambda: time.time() + 3600
+    s, body = req(hub, "POST", "/api/v1/bulk/prerestore-remove", {"stacks": ["app", "other"], "confirm": "remove"},
+                  headers=auth)
+    assert s == 202 and body["skipped"] == [{"stack": "other", "reason": "no set-aside folders"}]
+    job = wait_job(hub, body["started"][0]["job"]["id"])
+    assert job.kind == "bulk-prerestore-remove" and job.state == "ok" and job.result["removed"] == [str(aside)]
+    assert not aside.exists()
+
+
+def test_agent_bulk_jobs_dedupe_identical_requests(tmp_path, repo):
+    from backtrack.server import ApiError, local_agent_call
+
+    lab = Lab(tmp_path, repo, machine="alpha")
+    service = Service(lab.cfg, lab.agent)  # runner not started: jobs stay queued
+    first = local_agent_call(service, "POST", "/v1/bulk/backup", {"stacks": ["b", "a"]})
+    again = local_agent_call(service, "POST", "/v1/bulk/backup", {"stacks": ["a", "b"]})
+    other = local_agent_call(service, "POST", "/v1/bulk/backup", {"stacks": ["a"]})
+    assert again["existing"] and again["job"]["id"] == first["job"]["id"]
+    assert "existing" not in other and first["job"]["params"] == {"stacks": ["a", "b"], "trigger": "manual"}
+    with pytest.raises(ApiError):
+        local_agent_call(service, "POST", "/v1/bulk/restore", {"stacks": ["a"]})
+
+
+def test_bulk_plan_routes_stacks_to_their_agents(hub):
+    from backtrack.hub import AgentUnreachable, Hub
+
+    fleet = [
+        {"machine": "alpha", "online": True, "version": "0.4.0", "stacks": [{"name": "a"}, {"name": "b"}],
+         "prerestore": [{"stack": "a", "path": "/x/a.pre-restore", "removable": True},
+                        {"stack": "b", "path": "/x/b.pre-restore", "removable": False}]},
+        {"machine": "beta", "online": True, "version": "0.4.0", "stacks": [{"name": "c"}]},
+        {"machine": "gamma", "online": False, "version": "0.4.0", "stacks": [{"name": "d"}]},
+        {"machine": "delta", "online": True, "version": "0.3.0", "stacks": [{"name": "e"}]},
+        {"machine": "eps", "online": True, "version": "0.4.0", "stacks": [{"name": "f"}]},
+    ]
+    calls = []
+
+    def call(machine, method, path, body=None):
+        calls.append((machine, path, body))
+        if machine == "eps":
+            raise AgentUnreachable("eps: connection refused")
+        return {"job": {"id": machine}}
+
+    h = Hub(hub.service, KEY)
+    h.agents = lambda: fleet
+    h.call = call
+    res = h.bulk("backup", ["a", "b", "c", "d", "e", "f", "z"])
+    assert [(s["machine"], s["stacks"]) for s in res["started"]] == [("alpha", ["a", "b"]), ("beta", ["c"])]
+    reasons = {s["stack"]: s["reason"] for s in res["skipped"]}
+    assert reasons["d"] == "agent offline" and "0.4.0" in reasons["e"] and "refused" in reasons["f"]
+    assert reasons["z"] == "no agent reports it"
+    assert ("alpha", "/v1/bulk/backup", {"stacks": ["a", "b"]}) in calls
+    assert {c[0] for c in calls} == {"alpha", "beta", "eps"}  # never the offline or outdated agent
+
+    calls.clear()
+    res = h.bulk("prerestore-remove", ["a", "b", "c"])
+    assert [(s["machine"], s["stacks"]) for s in res["started"]] == [("alpha", ["a"])]
+    assert {s["stack"]: s["reason"] for s in res["skipped"]} == {
+        "b": "no set-aside folder is safe to remove yet", "c": "no set-aside folders"}
+    assert calls == [("alpha", "/v1/bulk/prerestore-remove", {"stacks": ["a"]})]
+
+
+def test_bulk_review_pages():
+    from backtrack import ui
+
+    agents = [{"machine": "alpha", "online": True, "job": {"kind": "backup"},
+               "stacks": [{"name": "db", "mode": "stop"}, {"name": "web", "mode": "live"}]}]
+    plan = {"ready": {"alpha": ["db", "web"]}, "skipped": [{"stack": "old", "reason": "agent offline"}]}
+    html = ui.bulk_page("backup", ["db", "old", "web"], plan, agents, [], "tok")
+    assert "Stops while backed up: <span class=\"bt-code\">db</span>" in html and "queues behind" in html
+    assert "Back up 2 stacks" in html and "agent offline" in html and 'action="/bulk/backup"' in html
+    assert html.count('name="stack"') == 3
+
+    folders = [{"machine": "alpha", "stack": "db", "path": "/x/db.pre-restore", "size": 2048, "removable": True},
+               {"machine": "alpha", "stack": "db", "path": "/x/db.pre-restore.1", "size": 10, "removable": False,
+                "reason": "settling"}]
+    html = ui.bulk_page("prerestore-remove", ["db"], {"ready": {"alpha": ["db"]}, "skipped": []}, agents, folders, "tok")
+    assert "Removes <span class=\"bt-code\">/x/db.pre-restore</span>" in html and "Keeps" in html and "settling" in html
+    assert "Remove 1 folder<" in html and 'pattern="remove"' in html
+    empty_plan = {"ready": {}, "skipped": [{"stack": "db", "reason": "no set-aside folders"}]}
+    assert "<form" not in ui.bulk_page("prerestore-remove", ["db"], empty_plan, agents, [], "tok")

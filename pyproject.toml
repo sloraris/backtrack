@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "backtrack"
-version = "0.3.0"
+version = "0.4.0"
 description = "Back up Docker Compose stacks with restic: one agent per host, one shared repo, an optional hub."
 readme = "README.md"
 license = "MIT"

@@ -14,7 +14,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from backtrack import __version__, ui
 from backtrack.hub import AgentUnreachable, Hub
@@ -27,6 +27,7 @@ log = logging.getLogger("backtrack")
 SESSION_TTL = 12 * 3600
 MAX_BODY = 64 * 1024
 STATIC = {"style.css", "app.js", "mark.svg"}
+MAX_BULK = 500
 
 
 class ApiError(Exception):
@@ -39,6 +40,15 @@ def _stack_name(name: str) -> str:
     if not NAME_RE.match(name):
         raise ApiError(400, "invalid stack name")
     return name
+
+
+def _stack_list(value) -> list[str]:
+    """A bulk request's `stacks`: a non-empty list of stack names, deduplicated and sorted."""
+    if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
+        raise ApiError(400, '"stacks" must be a non-empty list of stack names')
+    if len(value) > MAX_BULK:
+        raise ApiError(400, f"at most {MAX_BULK} stacks at once")
+    return sorted({_stack_name(v) for v in value})
 
 
 def local_agent_call(service, method: str, path: str, body: dict | None) -> dict:
@@ -80,6 +90,18 @@ def local_agent_call(service, method: str, path: str, body: dict | None) -> dict
         if existing:
             return {"job": existing.to_dict(), "existing": True}
         return {"job": service.submit("backup-all", trigger="manual").to_dict()}
+    if method == "POST" and parts[:1] == ["bulk"] and len(parts) == 2:
+        # Bulk actions on the stacks the hub picked for this agent: one job for all of them.
+        kind = {"backup": "bulk-backup", "prerestore-remove": "bulk-prerestore-remove"}.get(parts[1])
+        if not kind:
+            raise ApiError(404, "not found")
+        params = {"stacks": _stack_list(body.get("stacks"))}
+        if kind == "bulk-backup":
+            params["trigger"] = "manual"
+        existing = service.pending(kind, params)  # the same request twice queues one job
+        if existing:
+            return {"job": existing.to_dict(), "existing": True}
+        return {"job": service.submit(kind, **params).to_dict()}
     if method == "POST" and parts[:1] == ["stacks"] and parts[2:] == ["prerestore", "remove"]:
         stack = _stack_name(parts[1])
         path = str(body.get("path") or "")
@@ -312,6 +334,17 @@ def make_handler(service, hub: Hub | None):
                 if not res["started"]:
                     return self._json(409, {"error": "nothing started: " + _skipped_text(res["skipped"]), **res})
                 return self._json(202, res)
+            if method == "POST" and len(parts) == 2 and parts[0] == "bulk" and parts[1] in Hub.BULK_ACTIONS:
+                if scope != "write":
+                    raise ApiError(403, "this token is read-only")
+                data = json.loads(body or b"{}")
+                stacks = _stack_list(data.get("stacks"))
+                if parts[1] == "prerestore-remove" and data.get("confirm") != "remove":
+                    raise ApiError(400, 'set "confirm" to "remove" to remove set-aside folders')
+                res = hub.bulk(parts[1], stacks)
+                if not res["started"]:
+                    return self._json(409, {"error": "nothing started: " + _skipped_text(res["skipped"]), **res})
+                return self._json(202, res)
             if method == "POST" and parts[:1] == ["stacks"] and parts[2:] == ["prerestore", "remove"]:
                 if scope != "write":
                     raise ApiError(403, "this token is read-only")
@@ -344,6 +377,20 @@ def make_handler(service, hub: Hub | None):
                 except AgentUnreachable as e:
                     raise ApiError(502, str(e)) from e
             raise ApiError(404, "not found")
+
+        def _after_bulk(self, res: dict, back: str, done: str) -> None:
+            """Where a bulk action goes next: its job, the job list, or back with what was skipped."""
+            started, skipped = res["started"], res["skipped"]
+            sep = "&" if "?" in back else "?"
+            if not started:
+                return self._redirect(f"{back}{sep}done=error&detail=" + _q("Nothing started: " + _skipped_text(skipped)))
+            if len(started) == 1 and not skipped:
+                m, job_id = started[0]["machine"], started[0]["job"]["id"]
+                return self._redirect(f"/jobs/{ui.u(m)}/{ui.u(job_id)}?done={done}")
+            detail = "Queued on " + ", ".join(s["machine"] for s in started) + "."
+            if skipped:
+                detail += " Skipped: " + _skipped_text(skipped) + "."
+            return self._redirect(f"/jobs?done={done}&detail={_q(detail)}")
 
         # -- static -----------------------------------------------------------------------------------------
         def _static(self, name: str) -> None:
@@ -411,6 +458,18 @@ def make_handler(service, hub: Hub | None):
                         snaps = []
                     return render(parts[1], "stacks", ui.stack_page(found[0], found[1], snaps, csrf,
                                                                     hub.prerestore(parts[1])))
+                if parts == ["bulk"]:
+                    action = (query.get("action") or [""])[0]
+                    names = sorted(set(query.get("stack") or []))
+                    if action not in Hub.BULK_ACTIONS:
+                        raise ApiError(404, "no such bulk action")
+                    if not names:
+                        return self._redirect("/?done=error&detail=Select+at+least+one+stack.")
+                    stacks = _stack_list(names)
+                    title = "Back up selected stacks" if action == "backup" else "Remove set-aside folders"
+                    return render(title, "stacks", ui.bulk_page(action, stacks, hub.bulk_plan(action, stacks),
+                                                                hub.agents(), hub.prerestore(), csrf,
+                                                                detail if done == "error" else ""))
                 if parts == ["agents"]:
                     lease = hub.share.lease()
                     return render("Agents", "agents", ui.agents_page(hub.agents(), lease.to_dict() if lease else None))
@@ -452,22 +511,19 @@ def make_handler(service, hub: Hub | None):
                                               f"{'migrate' if trigger == 'pre-migrate' else 'backup'}")
                     if parts == ["backup-all"]:
                         machine = form.get("machine") or None
-                        back = f"/agents/{ui.u(machine)}" if machine else "/"
                         try:
                             res = hub.backup_all(machine)
                         except LookupError as e:
                             return self._redirect(f"/?done=error&detail={_q(str(e))}")
-                        started, skipped = res["started"], res["skipped"]
-                        if not started:
-                            return self._redirect(f"{back}?done=error&detail="
-                                                  + _q("Nothing started: " + _skipped_text(skipped)))
-                        if len(started) == 1 and not skipped:
-                            m, job_id = started[0]["machine"], started[0]["job"]["id"]
-                            return self._redirect(f"/jobs/{ui.u(m)}/{ui.u(job_id)}?done=backup-all")
-                        detail = "Queued on " + ", ".join(s["machine"] for s in started) + "."
-                        if skipped:
-                            detail += " Skipped: " + _skipped_text(skipped) + "."
-                        return self._redirect(f"/jobs?done=backup-all&detail={_q(detail)}")
+                        return self._after_bulk(res, f"/agents/{ui.u(machine)}" if machine else "/", "backup-all")
+                    if len(parts) == 2 and parts[0] == "bulk" and parts[1] in Hub.BULK_ACTIONS:
+                        names = parse_qs(body.decode(errors="replace")).get("stack") or []
+                        stacks = _stack_list(names)
+                        back = "/bulk?" + urlencode({"action": parts[1]}) + "&" + urlencode({"stack": stacks}, doseq=True)
+                        if parts[1] == "prerestore-remove" and form.get("confirm") != "remove":
+                            return self._redirect(f"{back}&done=error&detail=Type+remove+to+confirm.")
+                        return self._after_bulk(hub.bulk(parts[1], stacks), back,
+                                                "bulk-backup" if parts[1] == "backup" else "bulk-prerestore")
                     if len(parts) == 3 and parts[0] == "stacks" and parts[2] == "restore":
                         stack = _stack_name(parts[1])
                         if form.get("confirm") != stack:
@@ -518,7 +574,7 @@ def make_handler(service, hub: Hub | None):
 
 
 def _skipped_text(skipped: list[dict]) -> str:
-    return "; ".join(f"{s['machine']} ({s['reason']})" for s in skipped) or "no agents"
+    return "; ".join(f"{s.get('stack') or s['machine']} ({s['reason']})" for s in skipped) or "nothing selected"
 
 
 def _q(s: str) -> str:

@@ -145,6 +145,8 @@ shown once; the hub keeps only a hash, records when it was last used, and lets y
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>"}` | write |
 | POST | `/backup-all` `{"confirm":"all"}`, or `{"machine":"<agent>","confirm":"<agent>"}` for one agent | write |
+| POST | `/bulk/backup` `{"stacks":["…"]}` | write |
+| POST | `/bulk/prerestore-remove` `{"stacks":["…"],"confirm":"remove"}` | write |
 
 A dashboard, monitor or assistant that only reports needs a read token: `/status` for the overview, `/stacks`
 for each stack's last backup, and `/jobs?state=failed` for what went wrong and why.

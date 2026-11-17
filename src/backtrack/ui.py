@@ -69,6 +69,8 @@ TOASTS = {
     "prerestore": ("success", "Removal queued", "The agent checks the stack's health again before it deletes."),
     "revoked": ("success", "Token revoked", "Requests with it are refused from now on."),
     "backup-all": ("success", "Back up all queued", "Each agent backs up its stacks one at a time."),
+    "bulk-backup": ("success", "Backups queued", "Each agent backs up its selected stacks one at a time."),
+    "bulk-prerestore": ("success", "Removals queued", "Each agent checks every folder again before it deletes."),
     "error": ("error", "That didn't work", ""),
 }
 
@@ -226,6 +228,69 @@ def backup_all(agents: list[dict], csrf: str, machine: str | None = None) -> str
             f'Back up {total} stack{"s" if total != 1 else ""}</button></form></div></div>')
 
 
+def bulk_page(action: str, stacks: list[str], plan: dict, agents: list[dict], folders: list[dict], csrf: str,
+              error: str = "") -> str:
+    """Review a bulk action before it runs: per agent, what happens to each selected stack; then what is skipped."""
+    modes = {}
+    for a in agents:
+        for s in a.get("stacks", []):
+            modes.setdefault((a["machine"], s["name"]), s.get("mode"))
+    busy = {a["machine"] for a in agents if a.get("job") or a.get("queued")}
+    rows, count = [], 0
+    for m, names in plan["ready"].items():
+        facts = []
+        if action == "backup":
+            count += len(names)
+            stop = [n for n in names if modes.get((m, n)) == "stop"]
+            live = [n for n in names if modes.get((m, n)) != "stop"]
+            if stop:
+                facts.append(f'<p class="bt-setting__desc">Stops while backed up: <span class="bt-code">'
+                             f'{e(", ".join(stop))}</span></p>')
+            if live:
+                facts.append(f'<p class="bt-setting__desc">Stays up: <span class="bt-code">{e(", ".join(live))}</span></p>')
+        else:
+            for n in names:
+                for f in folders:
+                    if f["machine"] == m and f["stack"] == n:
+                        safe = f.get("removable")
+                        count += 1 if safe else 0
+                        word = "Removes" if safe else "Keeps"
+                        why = "" if safe else f' · {e(f.get("reason") or "not safe yet")}'
+                        facts.append(f'<p class="bt-setting__desc">{word} <span class="bt-code">{e(f["path"])}</span>'
+                                     f' · {e(size(f.get("size")))}{why}</p>')
+        note = " · queues behind the current job" if m in busy else ""
+        rows.append(f'<div class="bt-setting"><div class="bt-setting__text"><p class="bt-setting__title">{e(m)}'
+                    f' <span class="bt-muted bt-small">{len(names)} stack{"s" if len(names) != 1 else ""}{e(note)}'
+                    f'</span></p>{"".join(facts)}</div></div>')
+    skipped = "".join(f'<li><span class="bt-code">{e(x["stack"])}</span>: {e(x["reason"])}</li>' for x in plan["skipped"])
+    skipped_html = (f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div>'
+                    f'<h2 class="bt-h2">Skipped</h2></div></div><ul class="bt-list">{skipped}</ul></section>'
+                    if skipped else "")
+    hidden = "".join(f'<input type="hidden" name="stack" value="{e(n)}">' for n in stacks)
+    if action == "backup":
+        title, desc = "Back up selected stacks", ("Each agent backs up its stacks one at a time; agents run side by "
+                                                  "side. Snapshots are tagged manual.")
+        confirm = ""
+        button = f'<button class="bt-btn bt-btn--primary" type="submit">Back up {count} stack{"s" if count != 1 else ""}</button>'
+    else:
+        title, desc = "Remove set-aside folders", ("Each folder's safety snapshot stays in the repository. The agent "
+                                                   "checks every folder again and keeps any that stopped being safe.")
+        confirm = ('<label class="bt-field"><span class="bt-field__label">Type remove to confirm</span>'
+                   '<input class="bt-input bt-input--mono" name="confirm" autocomplete="off" spellcheck="false" '
+                   'required pattern="remove"></label>')
+        button = (f'<button class="bt-btn bt-btn--danger" type="submit">Remove {count} '
+                  f'folder{"s" if count != 1 else ""}</button>')
+    warn = callout("error", "Nothing started", error) if error else ""
+    form = (f'<form class="bt-stack" method="post" action="/bulk/{e(action)}"><input type="hidden" name="csrf" '
+            f'value="{e(csrf)}">{hidden}{confirm}<div class="bt-cluster bt-cluster--end">'
+            f'<a class="bt-btn bt-btn--ghost" href="/">Cancel</a>{button}</div></form>' if plan["ready"] else
+            '<div class="bt-cluster"><a class="bt-btn bt-btn--outline" href="/">Back to stacks</a></div>')
+    ready = (f'<section class="bt-section bt-section--card"><div class="bt-settings">{"".join(rows)}</div></section>'
+             if rows else empty("Nothing to do", "None of the selected stacks can be acted on right now."))
+    return (f'<main id="main" class="bt-page bt-page--narrow">{header(title, "bulk", desc)}{warn}{ready}'
+            f'{skipped_html}{form}</main>')
+
+
 # -- pages --------------------------------------------------------------------------------------------------------
 
 def login(error: str = "") -> str:
@@ -255,7 +320,9 @@ def stacks_page(agents: list[dict], snapshot_count: int | None, lease: dict | No
         last = s.get("last") or {}
         state = status("Misconfigured", "down") if s.get("error") else result_status(last.get("state"))
         rows.append(
-            f'<tr><td><a class="bt-h3 bt-table__link" href="/stacks/{u(s["name"])}">{e(s["name"])}</a></td>'
+            f'<tr><td class="bt-table__check"><input type="checkbox" name="stack" value="{e(s["name"])}" form="bt-bulk" '
+            f'aria-label="Select {e(s["name"])}"></td>'
+            f'<td><a class="bt-h3 bt-table__link" href="/stacks/{u(s["name"])}">{e(s["name"])}</a></td>'
             f'<td class="bt-code">{e(a["machine"])}</td><td class="bt-muted">{e(s.get("mode") or "–")}</td>'
             f'<td>{e(ago(last.get("time")))}</td><td class="num">{e(size(last.get("data_added")))}</td>'
             f'<td>{state}</td></tr>')
@@ -272,11 +339,20 @@ def stacks_page(agents: list[dict], snapshot_count: int | None, lease: dict | No
         f'<div class="bt-card bt-card--dense"><p class="bt-card__label">{e(label)}</p>'
         f'<p class="bt-card__metric{" bt-card__metric--" + tone if tone else ""}">{e(value)}'
         f'{" <small>" + e(ref) + "</small>" if ref else ""}</p></div>' for label, value, ref, tone in metrics)
-    table = (f'<div class="bt-table-wrap"><table class="bt-table"><thead><tr><th>Stack</th><th>Machine</th><th>Mode</th>'
+    table = (f'<div class="bt-table-wrap"><table class="bt-table"><thead><tr><th class="bt-table__check">'
+             f'<input type="checkbox" data-select-all="stack" aria-label="Select every stack" hidden></th>'
+             f'<th>Stack</th><th>Machine</th><th>Mode</th>'
              f'<th>Last backup</th><th class="num">Added</th><th>State</th></tr></thead><tbody>{"".join(rows)}'
              f'</tbody></table></div>' if rows else
              empty("No stacks yet", "Stacks appear when a container has the backtrack.mode label."))
-    body = (header("Stacks", "fleet", actions=backup_all(agents, csrf)) + "".join(callout(*w) for w in warnings[:2])
+    # Checkboxes pick stacks for a bulk action; the buttons submit them to a review page (GET, nothing runs yet).
+    bulk = ('<form id="bt-bulk" method="get" action="/bulk"></form>'
+            '<button class="bt-btn bt-btn--outline" type="submit" form="bt-bulk" name="action" value="prerestore-remove">'
+            'Remove set-aside folders</button>'
+            '<button class="bt-btn bt-btn--primary" type="submit" form="bt-bulk" name="action" value="backup">'
+            'Back up selected</button>') if rows else ""
+    body = (header("Stacks", "fleet", "Select stacks for a bulk backup or to remove their set-aside folders.",
+                   actions=bulk) + "".join(callout(*w) for w in warnings[:2])
             + f'<div class="bt-grid bt-grid--4">{cards}</div>'
             + f'<section class="bt-card bt-card--flush">{table}</section>')
     return f'<main id="main" class="bt-page">{body}</main>'

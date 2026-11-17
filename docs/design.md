@@ -6,7 +6,7 @@ Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one
 write to one shared restic repo. One agent can also run the hub: a web UI and API for the whole fleet. Agents
 never depend on the hub, the management plane (Komodo, Portainer, ...) or each other to back up and restore.
 
-Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1; snapshot times with a UTC offset fixed in v0.2.2; Back up all, named API tokens and the job list in v0.3.0**. Decisions are recorded in [Decisions](#decisions).
+Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1; snapshot times with a UTC offset fixed in v0.2.2; Back up all, named API tokens and the job list in v0.3.0; bulk actions on selected stacks in v0.4.0**. Decisions are recorded in [Decisions](#decisions).
 
 ## Project
 
@@ -165,6 +165,13 @@ just another `stop` stack: the agent talks to Docker directly.
   its stacks one at a time and agents run side by side. A busy agent queues it behind its current job; an agent
   that already has one queued or running answers with that job instead of queueing a second; the hub skips
   offline agents, agents without stacks and agents older than 0.3.0, and lists each with the reason.
+- Bulk actions on stacks picked in the hub: back up, or remove their set-aside folders that are safe to remove.
+  The hub sends each agent one job with its share of the stacks (`bulk-backup`, the Back up all loop limited to
+  those stacks; `bulk-prerestore-remove`, which checks every folder again and keeps any that stopped being
+  safe), so agents run side by side and each works through its stacks one at a time. The same request twice
+  returns the queued job. Stacks that no agent reports, that have nothing safe to remove, or whose agent is
+  offline, unreachable or older than 0.4.0 are skipped with the reason. Restore has no bulk form: each restore
+  needs its own snapshot choice and typed confirmation.
 - One job at a time per agent. Manual jobs queue behind a running one. Jobs have ids, state and a log; the
   last 200 are kept in `STATE_DIR/history.jsonl`. A file lock in `STATE_DIR` is shared with CLI runs
   (`docker exec ... backtrack backup`), so a command never runs alongside the nightly job.
@@ -294,8 +301,8 @@ Failure alerts.
 
 - Failures go to Discord (one embed per failure: stack, machine, step, last lines of restic's stderr) and/or the
   plain JSON webhook. A summary of a nightly or Back up all run is posted only when something failed (the
-  webhook's `summary` event has `run`: `nightly` or `backup-all`). Successes are silent.
-- After each nightly run (not after Back up all) the agent calls `HEARTBEAT_URL` with `status=up` or
+  webhook's `summary` event has `run`: `nightly`, `backup-all` or `bulk-backup`). Successes are silent.
+- After each nightly run (not after Back up all or a bulk backup) the agent calls `HEARTBEAT_URL` with `status=up` or
   `status=down` and a short message (Kuma's push format; other services ignore the extra query). Set the
   monitor's interval to about 26 h so a run that never happens alerts.
 - Secrets, tokens and webhook URLs are never logged; URLs show as host only.
@@ -307,9 +314,13 @@ dark setting.
 
 - Fleet: agents (online, version, current job, last nightly), warnings (offline agent, no maintenance lease, two
   maintenance claims).
-- Stacks: all stacks across agents (machine, mode, last backup, size added, snapshot count). Back up now; Back
-  up for migration. Back up all (overview: every online agent; an agent's page: that agent) opens a panel that
-  names the stacks that stop and those that stay up, then confirms with one click: a backup changes no data.
+- Stacks: all stacks across agents (machine, mode, last backup, size added, snapshot count), each with a
+  checkbox (a select-all box appears with JavaScript). **Back up selected** and **Remove set-aside folders**
+  open a review page listing, per agent, the stacks that stop and those that stay up, or the folders that go
+  and those that stay, then what is skipped. A backup confirms with one click; removal needs `remove` typed.
+- Stack: Back up now; Back up for migration.
+- Agent: Back up all for that agent opens a panel that names the stacks that stop and those that stay up, then
+  confirms with one click: a backup changes no data.
 - Stack: snapshots from the repo (any machine), Restore with typed confirmation, set-aside folders with their
   verdict and a Remove button (typed confirmation) once safe, job logs.
 - Agent: settings (env-set ones locked), maintenance lease.
@@ -321,7 +332,8 @@ Agent API (hub only, signed): `GET /v1/status`, `GET /v1/stacks`, `GET /v1/stack
 `POST /v1/stacks/{s}/backup`, `POST /v1/stacks/{s}/restore`, `GET /v1/jobs?limit=`, `GET /v1/jobs/{id}`,
 `GET|PUT /v1/settings`,
 `GET /v1/prerestore`, `POST /v1/stacks/{s}/prerestore/remove`, `POST /v1/backup-all` (returns the queued or
-running job with `"existing": true` instead of queueing a second).
+running job with `"existing": true` instead of queueing a second), `POST /v1/bulk/backup` and
+`POST /v1/bulk/prerestore-remove` with `{"stacks":[…]}` (the same answer for an identical request).
 
 Hub API (bearer token or session), under `/api/v1`:
 
@@ -337,6 +349,8 @@ Hub API (bearer token or session), under `/api/v1`:
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
 | POST | `/backup-all` `{"confirm":"all"}` or `{"machine":"<agent>","confirm":"<agent>"}` | write: queues a `backup-all` job on every online agent (or that one). 202 with `started` (`machine`, `job`, `stacks`) and `skipped` (`machine`, `reason`); 409 with the same lists when nothing started |
+| POST | `/bulk/backup` `{"stacks":["…"]}` | write: one `bulk-backup` job per agent with its share of the stacks. 202 with `started` (`machine`, `job`, `stacks`, `existing` when the same request was already queued) and `skipped` (`stack`, `machine` when known, `reason`); 409 with the same lists when nothing started. At most 500 stacks |
+| POST | `/bulk/prerestore-remove` `{"stacks":["…"],"confirm":"remove"}` | write: removes the stacks' set-aside folders that are safe to remove, one job per agent that has some; answers like `/bulk/backup` |
 | GET | `/prerestore` | read: set-aside folders, each with `state` (`settling`, `safe`, `unhealthy`, `failed`) |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>","machine":"…"}` | write; `machine` only when two agents have the path |
 
@@ -352,7 +366,7 @@ a log.
 name: backtrack
 services:
   agent:
-    image: ghcr.io/sloraris/backtrack:0.3.0
+    image: ghcr.io/sloraris/backtrack:0.4.0
     container_name: backtrack
     restart: unless-stopped
     environment:
@@ -433,3 +447,4 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 15 | One neutral UI theme (light/dark). The original theme was dropped after v0.1.0 to keep Backtrack standalone. |
 | 16 | Set-aside folders are recorded and removed only on request (or opt-in auto-remove) once the stack is healthy and the safety snapshot exists. |
 | 17 | Back up all reuses the nightly loop as its own `backup-all` job: tagged manual, no heartbeat (it must not hide a missed scheduled run), one per agent at a time, agents in parallel; busy agents queue it, offline ones are skipped. The UI confirms with one click after naming the stacks that stop; the API needs `confirm` (`all` or the agent). |
+| 18 | Bulk actions on stacks selected in the hub: back up, and remove safe set-aside folders; no bulk restore. One job per agent with its share of the stacks. Select-all replaces the overview's Back up all button; an agent's page keeps its own. A review page names what happens before anything runs; removal needs `remove` typed. `/api/v1/backup-all` stays for 0.3.0 clients. |

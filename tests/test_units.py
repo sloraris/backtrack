@@ -10,7 +10,7 @@ from backtrack.schedule import next_run
 from backtrack.signing import Verifier, sign
 from backtrack.stacks import L_MODE, Stack, discover, has_files, literal_ignores, literal_matches, restic_excludes
 
-TZ = ZoneInfo("America/Boise")
+TZ = ZoneInfo("America/Denver")
 
 
 # -- config ---------------------------------------------------------------------------------------------------
@@ -116,7 +116,7 @@ def test_daily_next_run():
 
 
 def test_daily_across_dst():
-    # 2026-03-08 spring forward at 02:00 in America/Boise; 2026-11-01 fall back.
+    # 2026-03-08 spring forward at 02:00 in America/Denver; 2026-11-01 fall back.
     before = datetime(2026, 3, 7, 12, 0, tzinfo=TZ)
     run = next_run("04:00", before, TZ, "daily")
     assert (run.month, run.day, run.hour) == (3, 8, 4) and run.utcoffset().total_seconds() == -6 * 3600

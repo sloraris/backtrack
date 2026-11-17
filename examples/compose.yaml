@@ -9,9 +9,9 @@ services:
     # A restore must not be cut in half: give the running job time to finish on shutdown.
     stop_grace_period: 10m
     environment:
-      MACHINE: echo
-      AGENT_URL: https://backup-echo.example.com
-      TZ: America/Boise
+      MACHINE: alpha
+      AGENT_URL: https://backup-alpha.example.com
+      TZ: Etc/UTC
       # Secrets: ${VAR} here, values from your secrets file (SOPS, .env, ...), never in this file.
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
       CLUSTER_KEY: ${CLUSTER_KEY}                 # same on every agent; only the hub uses it
@@ -25,8 +25,8 @@ services:
       - nas:/share                                # the shared restic repo (/share/restic) and presence files
     labels:
       - traefik.enable=true
-      - traefik.http.routers.backup-echo.rule=Host(`backup-echo.example.com`)
-      - traefik.http.services.backup-echo.loadbalancer.server.port=8080
+      - traefik.http.routers.backup-alpha.rule=Host(`backup-alpha.example.com`)
+      - traefik.http.services.backup-alpha.loadbalancer.server.port=8080
       - traefik.docker.network=traefik
     networks:
       - traefik

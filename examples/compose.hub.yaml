@@ -8,9 +8,9 @@ services:
     restart: unless-stopped
     stop_grace_period: 10m
     environment:
-      MACHINE: echo
-      AGENT_URL: https://backup-echo.example.com
-      TZ: America/Boise
+      MACHINE: alpha
+      AGENT_URL: https://backup-alpha.example.com
+      TZ: Etc/UTC
       HUB: "true"
       RESTIC_PASSWORD: ${RESTIC_PASSWORD}
       CLUSTER_KEY: ${CLUSTER_KEY}
@@ -31,8 +31,8 @@ services:
       - traefik.http.routers.backtrack.service=backtrack
       - traefik.http.services.backtrack.loadbalancer.server.port=8080
       # this host's agent API, which the hub calls like any other agent's
-      - traefik.http.routers.backup-echo.rule=Host(`backup-echo.example.com`)
-      - traefik.http.routers.backup-echo.service=backtrack
+      - traefik.http.routers.backup-alpha.rule=Host(`backup-alpha.example.com`)
+      - traefik.http.routers.backup-alpha.service=backtrack
       - traefik.docker.network=traefik
     networks:
       - traefik

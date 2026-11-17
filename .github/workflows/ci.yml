@@ -1,10 +1,14 @@
 name: ci
 
+# Docs-only changes don't run tests or build an image. GitHub ignores path filters on tag pushes, so a
+# release tag always builds.
 on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths-ignore: &docs ["**.md", "docs/**", "design/**", "LICENSE"]
   pull_request:
+    paths-ignore: *docs
 
 permissions:
   contents: read

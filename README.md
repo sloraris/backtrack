@@ -1,6 +1,6 @@
 <p align="center"><img src="design/logo/backtrack-mark.svg" alt="" width="112"></p>
 
-# Backtrack
+<h1 align="center">Backtrack</h1>
 
 Backs up Docker Compose stacks with [restic](https://restic.net). Run one agent container on every Docker host. All
 of them write to one shared restic repository, and one of them can also serve a web UI for the whole fleet.

@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import struct
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import quote, urlencode
@@ -36,11 +37,36 @@ class Container:
         return self.state in ("running", "restarting", "paused")
 
 
+@dataclass
+class Health:
+    """What `docker inspect` says about a container's health right now."""
+    running: bool
+    health: str | None  # healthy, unhealthy, starting; None without a healthcheck
+    started_at: float | None  # epoch seconds of the last (re)start
+    restarts: int = 0
+
+
 class DockerClient(Protocol):
     def containers(self) -> list[Container]: ...
+    def inspect(self, container_id: str) -> Health: ...
     def stop(self, container_id: str, timeout: int) -> None: ...
     def start(self, container_id: str) -> None: ...
     def run_host_command(self, command: str, env: dict[str, str]) -> tuple[int, str]: ...
+
+
+def parse_docker_time(value: str | None) -> float | None:
+    """'2026-01-02T03:04:05.123456789Z' -> epoch seconds. Docker's zero time and junk give None."""
+    if not value or value.startswith("0001-"):
+        return None
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)$", value)
+    if not m:
+        return None
+    frac = (m.group(2) or ".0")[:7]
+    tz = "+00:00" if m.group(3) == "Z" else m.group(3)
+    try:
+        return datetime.fromisoformat(m.group(1) + frac + tz).timestamp()
+    except ValueError:
+        return None
 
 
 def parse_depends_on(label: str) -> list[str]:
@@ -125,6 +151,14 @@ class Docker:
                 depends_on=parse_depends_on(labels.get("com.docker.compose.depends_on", "")),
             ))
         return out
+
+    def inspect(self, container_id: str) -> Health:
+        info = self._json("GET", f"/containers/{quote(container_id)}/json")
+        state = info.get("State") or {}
+        return Health(running=bool(state.get("Running")),
+                      health=(state.get("Health") or {}).get("Status") or None,
+                      started_at=parse_docker_time(state.get("StartedAt")),
+                      restarts=int(info.get("RestartCount") or 0))
 
     def stop(self, container_id: str, timeout: int) -> None:
         self._json("POST", f"/containers/{quote(container_id)}/stop?t={int(timeout)}", timeout=timeout + 60)

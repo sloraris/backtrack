@@ -67,6 +67,14 @@ def main(argv: list[str] | None = None) -> int:
     fs.add_argument("stack")
     fs.add_argument("--yes", action="store_true")
 
+    pa = sub.add_parser("prerestore", help="folders restores set aside: list them, or remove the safe ones")
+    pa_sub = pa.add_subparsers(dest="action", required=True)
+    pa_sub.add_parser("list", help="every set-aside folder and whether it is safe to remove")
+    pr_rm = pa_sub.add_parser("remove", help="remove a stack's set-aside folders once the stack is healthy")
+    pr_rm.add_argument("stack")
+    pr_rm.add_argument("--path", help="just this folder (default: every one of the stack that is safe)")
+    pr_rm.add_argument("--yes", action="store_true")
+
     args = p.parse_args(argv)
     if not args.cmd:
         args.cmd = "serve"
@@ -131,7 +139,39 @@ def main(argv: list[str] | None = None) -> int:
                                          f"prune. Type the stack name to continue: ", args.stack):
             return 1
         return _run(lambda j: agent.forget_stack(args.stack, j), _job("forget-stack", args.stack))
+    if args.cmd == "prerestore":
+        return _prerestore(agent, args)
     return 2
+
+
+def _prerestore(agent, args) -> int:
+    from backtrack import ui
+    items = agent.prerestore()
+    if args.action == "list":
+        if not items:
+            print("no set-aside folders")
+        for f in items:
+            print(f"{f['stack']:20} {f['state']:10} {ui.size(f.get('size')):>9}  {f['path']}  ({f['reason']})")
+        return 0
+    chosen = [f for f in items if f["stack"] == args.stack and (not args.path or f["path"] == args.path)]
+    if not chosen:
+        print(f"{args.stack} has no set-aside folder" + (f" {args.path}" if args.path else ""), file=sys.stderr)
+        return 1
+    if not args.path:
+        waiting = [f for f in chosen if not f["removable"]]
+        for f in waiting:
+            print(f"keeping {f['path']}: {f['reason']}")
+        chosen = [f for f in chosen if f["removable"]]
+        if not chosen:
+            return 1
+    paths = ", ".join(f["path"] for f in chosen)
+    if not args.yes and not _confirm(f"Remove {paths}? Type the stack name to continue: ", args.stack):
+        return 1
+    code = 0
+    for f in chosen:
+        code |= _run(lambda j, path=f["path"]: agent.remove_prerestore(args.stack, path, j),
+                     _job("prerestore-remove", args.stack))
+    return code
 
 
 def _confirm(prompt: str, expected: str) -> bool:

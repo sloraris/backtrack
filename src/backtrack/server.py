@@ -65,6 +65,15 @@ def local_agent_call(service, method: str, path: str, body: dict | None) -> dict
             if errors:
                 raise ApiError(400, "; ".join(errors))
             return {"settings": service.cfg.settings()}
+    if method == "GET" and parts == ["prerestore"]:
+        return {"folders": service.agent.prerestore()}
+    if method == "POST" and parts[:1] == ["stacks"] and parts[2:] == ["prerestore", "remove"]:
+        stack = _stack_name(parts[1])
+        path = str(body.get("path") or "")
+        aside = service.agent.asides.get(path)
+        if not aside or aside.stack != stack:
+            raise ApiError(404, f"{stack} has no set-aside folder {path!r} on {service.cfg.machine}")
+        return {"job": service.submit("prerestore-remove", stack, path=path).to_dict()}
     if method == "POST" and len(parts) == 3 and parts[0] == "stacks":
         stack = _stack_name(parts[1])
         if parts[2] == "backup":
@@ -255,11 +264,28 @@ def make_handler(service, hub: Hub | None):
                                                        for a in hub.agents() for s in a.get("stacks", [])]})
                 if len(parts) == 3 and parts[0] == "stacks" and parts[2] == "snapshots":
                     return self._json(200, {"snapshots": hub.snapshots(_stack_name(parts[1]))})
+                if parts == ["prerestore"]:
+                    return self._json(200, {"folders": hub.prerestore()})
                 if len(parts) == 3 and parts[0] == "jobs":
                     try:
                         return self._json(200, hub.call(parts[1], "GET", f"/v1/jobs/{parts[2]}"))
                     except AgentUnreachable as e:
                         raise ApiError(502, str(e)) from e
+            if method == "POST" and parts[:1] == ["stacks"] and parts[2:] == ["prerestore", "remove"]:
+                if scope != "write":
+                    raise ApiError(403, "this token is read-only")
+                stack = _stack_name(parts[1])
+                data = json.loads(body or b"{}")
+                if data.get("confirm") != stack:
+                    raise ApiError(400, f'set "confirm" to "{stack}" to remove a set-aside folder')
+                try:
+                    machine, res = hub.remove_prerestore(stack, str(data.get("path") or ""),
+                                                         data.get("machine") or None)
+                except AgentUnreachable as e:
+                    raise ApiError(502, str(e)) from e
+                except LookupError as e:
+                    raise ApiError(404, str(e)) from e
+                return self._json(202, {"machine": machine, **res})
             if method == "POST" and len(parts) == 3 and parts[0] == "stacks":
                 if scope != "write":
                     raise ApiError(403, "this token is read-only")
@@ -342,7 +368,8 @@ def make_handler(service, hub: Hub | None):
                         snaps = hub.snapshots(parts[1])
                     except Exception:  # noqa: BLE001
                         snaps = []
-                    return render(parts[1], "stacks", ui.stack_page(found[0], found[1], snaps, csrf))
+                    return render(parts[1], "stacks", ui.stack_page(found[0], found[1], snaps, csrf,
+                                                                    hub.prerestore(parts[1])))
                 if parts == ["agents"]:
                     lease = hub.share.lease()
                     return render("Agents", "agents", ui.agents_page(hub.agents(), lease.to_dict() if lease else None))
@@ -386,6 +413,16 @@ def make_handler(service, hub: Hub | None):
                             return self._redirect(f"/stacks/{stack}?done=error&detail=Type+the+stack+name+to+confirm.")
                         machine, res = hub.restore(stack, form.get("snapshot") or "latest")
                         return self._redirect(f"/jobs/{machine}/{res['job']['id']}?done=restore")
+                    if len(parts) == 4 and parts[0] == "stacks" and parts[2:] == ["prerestore", "remove"]:
+                        stack = _stack_name(parts[1])
+                        if form.get("confirm") != stack:
+                            return self._redirect(f"/stacks/{stack}?done=error&detail=Type+the+stack+name+to+confirm.")
+                        try:
+                            machine, res = hub.remove_prerestore(stack, form.get("path", ""),
+                                                                 form.get("machine") or None)
+                        except LookupError as e:
+                            return self._redirect(f"/stacks/{stack}?done=error&detail={_q(str(e))}")
+                        return self._redirect(f"/jobs/{machine}/{res['job']['id']}?done=prerestore")
                     if len(parts) == 3 and parts[0] == "agents" and parts[2] == "settings":
                         changes = {k: v for k, v in form.items() if k != "csrf"}
                         try:

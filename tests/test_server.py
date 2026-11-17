@@ -154,3 +154,49 @@ def test_static_files_only_from_allowlist(hub):
         assert r.status == 200 and b"--bg" in r.read(2000)
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(hub.base + "/static/../server.py", timeout=10)
+
+
+def test_prerestore_through_hub_api(hub):
+    auth = {"Authorization": "Bearer write-tok"}
+    s, body = req(hub, "POST", "/api/v1/stacks/app/backup", {"trigger": "manual"}, headers=auth)
+    wait_job(hub, body["job"]["id"])
+    s, body = req(hub, "POST", "/api/v1/stacks/app/restore", {"snapshot": "latest", "confirm": "app"}, headers=auth)
+    wait_job(hub, body["job"]["id"])
+    aside = str(hub.appdata / "app.pre-restore")
+
+    s, body = req(hub, "GET", "/api/v1/prerestore", headers={"Authorization": "Bearer read-tok"})
+    assert s == 200 and [(f["path"], f["machine"], f["state"]) for f in body["folders"]] == [(aside, "alpha", "settling")]
+    s, _ = req(hub, "POST", "/api/v1/stacks/app/prerestore/remove", {"path": aside, "confirm": "app"},
+               headers={"Authorization": "Bearer read-tok"})
+    assert s == 403
+    s, err = req(hub, "POST", "/api/v1/stacks/app/prerestore/remove", {"path": aside}, headers=auth)
+    assert s == 400 and "confirm" in err["error"]
+    s, _ = req(hub, "POST", "/api/v1/stacks/app/prerestore/remove", {"path": "/etc", "confirm": "app"}, headers=auth)
+    assert s == 404
+
+    # Too early: the agent checks again and refuses.
+    s, body = req(hub, "POST", "/api/v1/stacks/app/prerestore/remove", {"path": aside, "confirm": "app"}, headers=auth)
+    assert s == 202
+    job = wait_job(hub, body["job"]["id"])
+    assert job.state == "failed" and "isn't healthy" in job.error
+
+    hub.agent.clock = lambda: time.time() + 3600
+    s, body = req(hub, "GET", "/api/v1/status", headers=auth)
+    assert any("can be removed" in w["title"] for w in body["warnings"])
+    s, body = req(hub, "POST", "/api/v1/stacks/app/prerestore/remove", {"path": aside, "confirm": "app"}, headers=auth)
+    assert wait_job(hub, body["job"]["id"]).state == "ok"
+    assert not (hub.appdata / "app.pre-restore").exists()
+    assert req(hub, "GET", "/api/v1/prerestore", headers=auth)[1] == {"folders": []}
+
+
+def test_stack_page_lists_set_aside_folders():
+    from backtrack import ui
+    folder = {"path": "/opt/appdata/app.pre-restore", "stack": "app", "machine": "alpha", "created": time.time(),
+              "size": 2048, "snapshot": "aaaa1111", "safety_snapshot": "bbbb2222", "state": "safe",
+              "reason": "healthy", "removable": True}
+    stack = {"name": "app", "mode": "stop", "path": "/opt/appdata/app", "containers": []}
+    html = ui.stack_page(stack, {"machine": "alpha"}, [], "tok", [folder])
+    assert "Set-aside folders" in html and 'action="/stacks/app/prerestore/remove"' in html
+    assert 'value="/opt/appdata/app.pre-restore"' in html and "Safe to remove" in html
+    html = ui.stack_page(stack, {"machine": "alpha"}, [], "tok", [{**folder, "state": "settling", "removable": False}])
+    assert "prerestore/remove" not in html and "Settling" in html

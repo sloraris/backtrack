@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from backtrack.config import Config
-from backtrack.docker import Container, DockerError
+from backtrack.docker import Container, DockerError, Health
 from backtrack.jobs import Job
 from backtrack.notify import Notifier
 from backtrack.ops import Agent
@@ -28,6 +29,8 @@ class FakeDocker:
         self.host_commands: list[tuple[str, dict]] = []
         self.host_result = (0, "ok\n")
         self.on_host_command = None
+        self.health: dict[str, str | None] = {}  # container id -> healthcheck status; absent = no healthcheck
+        self.started_at: dict[str, float] = {}
 
     def add(self, project: str, service: str, labels: dict | None = None, state: str = "running",
             depends_on: list[str] | None = None) -> Container:
@@ -35,6 +38,7 @@ class FakeDocker:
                       state=state, labels={"com.docker.compose.project": project, **(labels or {})},
                       depends_on=depends_on or [])
         self.items.append(c)
+        self.started_at[c.id] = time.time() - 86400
         return c
 
     def containers(self):
@@ -52,6 +56,11 @@ class FakeDocker:
         if cid in self.fail_start:
             raise DockerError("boom")
         self._get(cid).state = "running"
+        self.started_at[cid] = time.time()
+
+    def inspect(self, cid):
+        c = self._get(cid)
+        return Health(running=c.running, health=self.health.get(cid), started_at=self.started_at.get(cid))
 
     def run_host_command(self, command, env):
         self.host_commands.append((command, env))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -50,12 +51,13 @@ class Snapshot:
 
 def _parse_time(s: str) -> datetime:
     # restic prints RFC3339 with nanoseconds; fromisoformat handles up to microseconds.
-    if "." in s:
-        head, rest = s.split(".", 1)
-        frac = "".join(ch for ch in rest if ch.isdigit())
-        tz = rest[len(frac):]
-        s = f"{head}.{frac[:6]}{tz}"
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    # The offset is "Z" or "+hh:mm"/"-hh:mm" (restic uses the container's TZ), and must survive the trim.
+    m = re.fullmatch(r"([^.]+)(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})", s.strip())
+    if not m:
+        raise ValueError(f"unexpected snapshot time {s!r}")
+    head, frac, tz = m.groups()
+    frac = f".{frac[:6]}" if frac else ""
+    return datetime.fromisoformat(head + frac + ("+00:00" if tz == "Z" else tz))
 
 
 # Snapshots Backtrack takes on its own schedule or on request, which the retention policy applies to. A

@@ -217,3 +217,25 @@ def test_literal_matches_at_any_depth(tmp_path):
         (tmp_path / rel).write_text("1")
     found = literal_matches(tmp_path, [Path("cache"), Path("data/tmp"), Path("nope/x")])
     assert [str(p) for p in found] == ["cache", "data/tmp", "x/cache"]
+
+
+# -- restic snapshot times ------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2026-01-10T03:00:12.123456789Z", "2026-01-10T03:00:12.123456+00:00"),
+    ("2026-01-09T22:00:12.123456789-05:00", "2026-01-09T22:00:12.123456-05:00"),
+    ("2026-07-01T10:00:00.5+02:00", "2026-07-01T10:00:00.500000+02:00"),
+    ("2026-01-10T03:00:12Z", "2026-01-10T03:00:12+00:00"),
+    ("2026-01-10T03:00:12-07:00", "2026-01-10T03:00:12-07:00"),
+])
+def test_snapshot_time_keeps_offset(raw, expected):
+    from backtrack.restic import _parse_time
+    t = _parse_time(raw)
+    assert t.tzinfo is not None and t.isoformat() == expected
+
+
+def test_snapshot_times_from_different_time_zones_sort():
+    # A repository written before and after the container's TZ changed mixes "Z" and "-05:00" offsets.
+    from backtrack.restic import _parse_time
+    times = [_parse_time("2026-01-10T03:00:12.1Z"), _parse_time("2026-01-09T23:00:12.123456789-05:00")]
+    assert sorted(times) == [times[0], times[1]]

@@ -21,7 +21,7 @@ HUB_ENV = {"HUB": "true", "UI_PASSWORD": "correct horse", "READ_TOKEN": "read-to
 
 @pytest.fixture
 def hub(tmp_path, repo):
-    lab = Lab(tmp_path, repo, machine="echo", extra_env=HUB_ENV)
+    lab = Lab(tmp_path, repo, machine="alpha", extra_env=HUB_ENV)
     lab.stack_dir("app", {"f": "1"})
     lab.docker.add("app", "web", {L_MODE: "stop"})
     service = Service(lab.cfg, lab.agent)
@@ -57,13 +57,13 @@ def wait_job(lab, job_id, timeout=60):
 
 
 def test_healthz_needs_no_auth(hub):
-    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "echo", "version": "0.1.1"})
+    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.1.1"})
 
 
 def test_agent_api_requires_signature(hub):
     assert req(hub, "GET", "/v1/status")[0] == 401
     status, body = req(hub, "GET", "/v1/status", headers=sign(KEY, "GET", "/v1/status"))
-    assert status == 200 and body["machine"] == "echo"
+    assert status == 200 and body["machine"] == "alpha"
     assert req(hub, "GET", "/v1/status", headers=sign("wrong", "GET", "/v1/status"))[0] == 401
 
 
@@ -71,7 +71,7 @@ def test_hub_api_token_scopes(hub):
     assert req(hub, "GET", "/api/v1/status")[0] == 401
     assert req(hub, "GET", "/api/v1/status", headers={"Authorization": "Bearer correct horse"})[0] == 401
     status, body = req(hub, "GET", "/api/v1/stacks", headers={"Authorization": "Bearer read-tok"})
-    assert status == 200 and body["stacks"][0]["name"] == "app" and body["stacks"][0]["machine"] == "echo"
+    assert status == 200 and body["stacks"][0]["name"] == "app" and body["stacks"][0]["machine"] == "alpha"
     s, _ = req(hub, "POST", "/api/v1/stacks/app/backup", {"trigger": "manual"},
                headers={"Authorization": "Bearer read-tok"})
     assert s == 403
@@ -80,7 +80,7 @@ def test_hub_api_token_scopes(hub):
 def test_backup_and_restore_through_hub_api(hub):
     auth = {"Authorization": "Bearer write-tok"}
     s, body = req(hub, "POST", "/api/v1/stacks/app/backup", {"trigger": "manual"}, headers=auth)
-    assert s == 202 and body["machine"] == "echo"
+    assert s == 202 and body["machine"] == "alpha"
     assert wait_job(hub, body["job"]["id"]).state == "ok"
     s, snaps = req(hub, "GET", "/api/v1/stacks/app/snapshots", headers=auth)
     assert s == 200 and len(snaps["snapshots"]) == 1
@@ -92,7 +92,7 @@ def test_backup_and_restore_through_hub_api(hub):
     assert wait_job(hub, body["job"]["id"]).state == "ok"
     assert (hub.appdata / "app.pre-restore").is_dir()
 
-    s, job = req(hub, "GET", f"/api/v1/jobs/echo/{body['job']['id']}", headers=auth)
+    s, job = req(hub, "GET", f"/api/v1/jobs/alpha/{body['job']['id']}", headers=auth)
     assert s == 200 and job["state"] == "ok" and any("files restored" in line for line in job["log"])
 
 
@@ -137,16 +137,16 @@ def test_ui_login_csrf_and_pages(hub):
     status, _, html = get("/")
     assert status == 200 and "app" in html and "/static/style.css" in html
     csrf = html.split('name="csrf" value="')[1].split('"')[0]
-    for path in ("/stacks/app", "/agents", "/agents/echo", "/jobs", "/repository"):
+    for path in ("/stacks/app", "/agents", "/agents/alpha", "/jobs", "/repository"):
         assert get(path)[0] == 200, path
     assert post("/stacks/app/backup", {"trigger": "manual"})[0] == 403  # no CSRF token
     status, url, html = post("/stacks/app/backup", {"trigger": "manual", "csrf": csrf})
-    assert status == 200 and "/jobs/echo/" in url and "Backup queued" in html
-    status, url, html = post("/agents/echo/settings", {"KEEP": "daily=9", "csrf": csrf})
+    assert status == 200 and "/jobs/alpha/" in url and "Backup queued" in html
+    status, url, html = post("/agents/alpha/settings", {"KEEP": "daily=9", "csrf": csrf})
     assert "done=saved" in url and hub.cfg.get("KEEP") == "daily=9"
-    status, url, _ = post("/repository/lease", {"machine": "echo", "csrf": csrf})
-    assert "done=lease" in url and hub.share.lease().machine == "echo"
-    assert hub.share.lease().assigned_by == "hub:echo"
+    status, url, _ = post("/repository/lease", {"machine": "alpha", "csrf": csrf})
+    assert "done=lease" in url and hub.share.lease().machine == "alpha"
+    assert hub.share.lease().assigned_by == "hub:alpha"
 
 
 def test_static_files_only_from_allowlist(hub):

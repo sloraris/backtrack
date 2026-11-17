@@ -3,7 +3,7 @@
 name: backtrack
 services:
   agent:
-    image: ghcr.io/sloraris/backtrack:0.2.2
+    image: ghcr.io/sloraris/backtrack:0.3.0
     container_name: backtrack
     restart: unless-stopped
     stop_grace_period: 10m

@@ -103,6 +103,7 @@ them, and are saved on that agent.
 ```bash
 docker exec backtrack backtrack list
 docker exec backtrack backtrack backup myapp                 # --trigger pre-migrate before moving a stack
+docker exec backtrack backtrack backup-all                   # every stack on this host now, e.g. before a risky change
 docker exec -it backtrack backtrack restore myapp            # --snapshot <id>; asks you to type the name
 docker exec backtrack backtrack auto-restore myapp           # exit 0: restored, had data, or starts fresh
 docker exec backtrack backtrack snapshots myapp
@@ -143,6 +144,7 @@ shown once; the hub keeps only a hash, records when it was last used, and lets y
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>"}` | write |
+| POST | `/backup-all` `{"confirm":"all"}`, or `{"machine":"<agent>","confirm":"<agent>"}` for one agent | write |
 
 A dashboard, monitor or assistant that only reports needs a read token: `/status` for the overview, `/stacks`
 for each stack's last backup, and `/jobs?state=failed` for what went wrong and why.

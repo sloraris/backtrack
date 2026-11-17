@@ -12,6 +12,10 @@ from backtrack.restic import ResticError
 from backtrack.signing import sign
 
 
+# The first release whose agents answer POST /v1/backup-all.
+BACKUP_ALL_SINCE = (0, 3, 0)
+
+
 class AgentUnreachable(Exception):
     pass
 
@@ -127,6 +131,43 @@ class Hub:
         _, a = found
         return a["machine"], self.call(a["machine"], "POST", f"/v1/stacks/{stack}/backup", {"trigger": trigger})
 
+    def backup_all(self, machine: str | None = None) -> dict:
+        """Queue a backup-all job on every online agent that has stacks (or on `machine` only).
+
+        Agents run in parallel; each backs up its own stacks one at a time. Agents that are offline, unreachable,
+        too old, without stacks, or already running one are skipped and listed with the reason.
+        """
+        agents = self.agents()
+        if machine:
+            agents = [a for a in agents if a["machine"] == machine]
+            if not agents:
+                raise LookupError(f"no agent {machine}")
+        started, skipped = [], []
+        for a in agents:
+            m = a["machine"]
+            names = [s["name"] for s in a.get("stacks", [])]
+            reason = None
+            if not a.get("online"):
+                reason = "offline"
+            elif not names:
+                reason = "no stacks"
+            elif older_than(a.get("version"), BACKUP_ALL_SINCE):
+                reason = f"runs {a.get('version')}; Back up all needs 0.3.0 or later"
+            if reason:
+                skipped.append({"machine": m, "reason": reason})
+                continue
+            try:
+                res = self.call(m, "POST", "/v1/backup-all", {})
+            except AgentUnreachable as e:
+                skipped.append({"machine": m, "reason": str(e)})
+                continue
+            if res.get("existing"):
+                skipped.append({"machine": m, "reason": "a backup-all is already queued or running",
+                                "job": res["job"]})
+            else:
+                started.append({"machine": m, "job": res["job"], "stacks": names})
+        return {"started": started, "skipped": skipped}
+
     def restore(self, stack: str, snapshot: str) -> tuple[str, dict]:
         found = self.find_stack(stack)
         if not found:
@@ -173,3 +214,11 @@ class Hub:
         if not any(a["machine"] == machine for a in self.agents()):
             raise AgentUnreachable(f"unknown agent {machine}")
         self.share.assign_lease(machine, f"hub:{self.cfg.machine}")
+
+
+def older_than(version: str | None, minimum: tuple[int, ...]) -> bool:
+    """True for a release older than `minimum`. Unknown or unparsable versions (a dev build) get the benefit."""
+    try:
+        return tuple(int(x) for x in (version or "").split(".")[:3]) < minimum
+    except ValueError:
+        return False

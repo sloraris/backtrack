@@ -6,7 +6,7 @@ Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one
 write to one shared restic repo. One agent can also run the hub: a web UI and API for the whole fleet. Agents
 never depend on the hub, the management plane (Komodo, Portainer, ...) or each other to back up and restore.
 
-Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1; snapshot times with a UTC offset fixed in v0.2.2**. Decisions are recorded in [Decisions](#decisions).
+Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1; snapshot times with a UTC offset fixed in v0.2.2; Back up all, named API tokens and the job list in v0.3.0**. Decisions are recorded in [Decisions](#decisions).
 
 ## Project
 
@@ -159,6 +159,12 @@ just another `stop` stack: the agent talks to Docker directly.
 
 - In-process scheduler in `TZ` (DST-safe). Missed runs are not replayed; the missing heartbeat alerts instead.
 - Nightly: this host's stacks one at a time, in name order. Hosts run independently.
+- Back up all: a `backup-all` job runs the same loop on demand, from the hub (every agent, or one) or
+  `backtrack backup-all`. Snapshots are tagged `trigger=manual`, failures alert and the summary is posted as for
+  the nightly run, but the heartbeat isn't called and the run doesn't count as the last nightly. Each agent runs
+  its stacks one at a time and agents run side by side. A busy agent queues it behind its current job; an agent
+  that already has one queued or running answers with that job instead of queueing a second; the hub skips
+  offline agents, agents without stacks and agents older than 0.3.0, and lists each with the reason.
 - One job at a time per agent. Manual jobs queue behind a running one. Jobs have ids, state and a log; the
   last 200 are kept in `STATE_DIR/history.jsonl`. A file lock in `STATE_DIR` is shared with CLI runs
   (`docker exec ... backtrack backup`), so a command never runs alongside the nightly job.
@@ -287,10 +293,11 @@ Failure alerts.
 ## Alerts and heartbeat
 
 - Failures go to Discord (one embed per failure: stack, machine, step, last lines of restic's stderr) and/or the
-  plain JSON webhook. A nightly summary is posted only when something failed. Successes are silent.
-- After each nightly run the agent calls `HEARTBEAT_URL` with `status=up` or `status=down` and a short message
-  (Kuma's push format; other services ignore the extra query). Set the monitor's interval to about 26 h so a run
-  that never happens alerts.
+  plain JSON webhook. A summary of a nightly or Back up all run is posted only when something failed (the
+  webhook's `summary` event has `run`: `nightly` or `backup-all`). Successes are silent.
+- After each nightly run (not after Back up all) the agent calls `HEARTBEAT_URL` with `status=up` or
+  `status=down` and a short message (Kuma's push format; other services ignore the extra query). Set the
+  monitor's interval to about 26 h so a run that never happens alerts.
 - Secrets, tokens and webhook URLs are never logged; URLs show as host only.
 
 ## Hub UI
@@ -301,7 +308,8 @@ dark setting.
 - Fleet: agents (online, version, current job, last nightly), warnings (offline agent, no maintenance lease, two
   maintenance claims).
 - Stacks: all stacks across agents (machine, mode, last backup, size added, snapshot count). Back up now; Back
-  up for migration.
+  up for migration. Back up all (overview: every online agent; an agent's page: that agent) opens a panel that
+  names the stacks that stop and those that stay up, then confirms with one click: a backup changes no data.
 - Stack: snapshots from the repo (any machine), Restore with typed confirmation, set-aside folders with their
   verdict and a Remove button (typed confirmation) once safe, job logs.
 - Agent: settings (env-set ones locked), maintenance lease.
@@ -312,7 +320,8 @@ dark setting.
 Agent API (hub only, signed): `GET /v1/status`, `GET /v1/stacks`, `GET /v1/stacks/{s}/snapshots`,
 `POST /v1/stacks/{s}/backup`, `POST /v1/stacks/{s}/restore`, `GET /v1/jobs?limit=`, `GET /v1/jobs/{id}`,
 `GET|PUT /v1/settings`,
-`GET /v1/prerestore`, `POST /v1/stacks/{s}/prerestore/remove`.
+`GET /v1/prerestore`, `POST /v1/stacks/{s}/prerestore/remove`, `POST /v1/backup-all` (returns the queued or
+running job with `"existing": true` instead of queueing a second).
 
 Hub API (bearer token or session), under `/api/v1`:
 
@@ -327,6 +336,7 @@ Hub API (bearer token or session), under `/api/v1`:
 | GET | `/jobs/{machine}/{id}` | read: one job with its log |
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
+| POST | `/backup-all` `{"confirm":"all"}` or `{"machine":"<agent>","confirm":"<agent>"}` | write: queues a `backup-all` job on every online agent (or that one). 202 with `started` (`machine`, `job`, `stacks`) and `skipped` (`machine`, `reason`); 409 with the same lists when nothing started |
 | GET | `/prerestore` | read: set-aside folders, each with `state` (`settling`, `safe`, `unhealthy`, `failed`) |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>","machine":"…"}` | write; `machine` only when two agents have the path |
 
@@ -342,7 +352,7 @@ a log.
 name: backtrack
 services:
   agent:
-    image: ghcr.io/sloraris/backtrack:0.2.2
+    image: ghcr.io/sloraris/backtrack:0.3.0
     container_name: backtrack
     restart: unless-stopped
     environment:
@@ -422,3 +432,4 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 14 | Alerts: Discord and a generic JSON webhook; heartbeat to any push URL. |
 | 15 | One neutral UI theme (light/dark). The original theme was dropped after v0.1.0 to keep Backtrack standalone. |
 | 16 | Set-aside folders are recorded and removed only on request (or opt-in auto-remove) once the stack is healthy and the safety snapshot exists. |
+| 17 | Back up all reuses the nightly loop as its own `backup-all` job: tagged manual, no heartbeat (it must not hide a missed scheduled run), one per agent at a time, agents in parallel; busy agents queue it, offline ones are skipped. The UI confirms with one click after naming the stacks that stop; the API needs `confirm` (`all` or the agent). |

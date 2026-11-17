@@ -183,7 +183,7 @@ class JobRunner:
                 out[job.stack] = {"time": job.finished, "state": job.state, "error": job.error,
                                   "snapshot": job.result.get("snapshot"),
                                   "data_added": job.result.get("data_added")}
-            elif job.kind == "nightly":
+            elif job.kind in ("nightly", "backup-all"):
                 for name, r in (job.result.get("stacks") or {}).items():
                     out[name] = {"time": job.finished, **r}
         return out

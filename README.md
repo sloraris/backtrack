@@ -1,3 +1,5 @@
+<p align="center"><img src="design/logo/backtrack-mark.svg" alt="" width="112"></p>
+
 # Backtrack
 
 Backs up Docker Compose stacks with [restic](https://restic.net). Run one agent container on every Docker host. All
@@ -134,5 +136,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest        # needs restic on PATH; ownership tests run only as root
 ```
 
-Design notes are in [docs/design.md](docs/design.md). MIT licensed; see `src/backtrack/static/NOTICE.md` for
+Design notes are in [docs/design.md](docs/design.md). The logo is in [design/logo](design/logo): the mark
+(also the UI's `static/mark.svg`), an icon on a dark circle (the UI's favicon), and square avatars (SVG and
+PNG) for chat webhooks, which crop them round. MIT licensed; see `src/backtrack/static/NOTICE.md` for
 the fonts, icons and design system that ship with the UI.

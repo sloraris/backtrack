@@ -106,7 +106,7 @@ def toast(key: str | None, detail: str = "") -> str:
 def head(title: str) -> str:
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)} · Backtrack</title>'
-            '<link rel="icon" href="/static/mark.svg"><link rel="stylesheet" href="/static/style.css"></head>')
+            '<link rel="icon" href="/static/favicon.svg"><link rel="stylesheet" href="/static/style.css"></head>')
 
 
 def page(title: str, current: str, body: str, csrf: str, toast_html: str = "", alerts: int = 0) -> str:
@@ -158,7 +158,8 @@ def login(error: str = "") -> str:
     err = (f'<p class="bt-field__help">{e(error)}</p>' if error else "")
     cls = "bt-field bt-field--error" if error else "bt-field"
     return (head("Sign in") + '<body class="bt-body"><main id="main" class="bt-center"><div class="bt-card">'
-            '<div class="bt-stack bt-stack--group"><h1 class="bt-h1">Sign in to Backtrack</h1>'
+            '<div class="bt-stack bt-stack--group"><img class="bt-login__mark" src="/static/mark.svg" alt="">'
+            '<h1 class="bt-h1">Sign in to Backtrack</h1>'
             '<form class="bt-stack" method="post" action="/login">'
             f'<label class="{cls}"><span class="bt-field__label">Admin password</span>'
             '<input class="bt-input" type="password" name="password" autocomplete="current-password" required autofocus>'

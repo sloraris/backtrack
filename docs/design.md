@@ -1,3 +1,5 @@
+<img src="../design/logo/backtrack-mark.svg" alt="" width="64">
+
 # Backtrack: design
 
 Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one agent container; all agents

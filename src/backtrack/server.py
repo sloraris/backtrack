@@ -24,7 +24,7 @@ from backtrack.stacks import NAME_RE
 log = logging.getLogger("backtrack")
 SESSION_TTL = 12 * 3600
 MAX_BODY = 64 * 1024
-STATIC = {"style.css", "app.js", "mark.svg"}
+STATIC = {"style.css", "app.js", "mark.svg", "favicon.svg"}
 
 
 class ApiError(Exception):

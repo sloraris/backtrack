@@ -153,13 +153,23 @@ class Agent:
         return {"snapshot": snap.short_id, "data_added": snap.summary.get("data_added")}
 
     def nightly(self, job: Job) -> dict:
+        return self._back_up_every_stack(job, "nightly")
+
+    def backup_all(self, job: Job) -> dict:
+        """Every stack now, as the nightly run would, but tagged manual and without the heartbeat.
+
+        The heartbeat says the schedule ran; a run started by hand must not hide a missed scheduled one.
+        """
+        return self._back_up_every_stack(job, "manual")
+
+    def _back_up_every_stack(self, job: Job, trigger: str) -> dict:
         results: dict[str, dict] = {}
         with exclusive(self.cfg.state_dir, job):
             stacks = self.stacks()
             job.log(f"{len(stacks)} stacks: {', '.join(s.name for s in stacks) or 'none'}")
             for stack in stacks:
                 try:
-                    snap = self._backup_stack(stack, "nightly", job)
+                    snap = self._backup_stack(stack, trigger, job)
                     results[stack.name] = {"state": "ok", "snapshot": snap.short_id,
                                            "data_added": snap.summary.get("data_added")}
                 except Exception as e:  # noqa: BLE001 - one stack failing must not stop the others
@@ -168,9 +178,10 @@ class Agent:
                     results[stack.name] = {"state": "failed", "error": str(e)}
                     self.notifier.failure(stack.name, "backup", str(e), detail)
         failed = [n for n, r in results.items() if r["state"] != "ok"]
-        self.notifier.summary(failed, len(results))
-        self.notifier.heartbeat(not failed, f"{len(results) - len(failed)}/{len(results)} stacks backed up"
-                                + (f"; failed: {', '.join(failed)}" if failed else ""))
+        self.notifier.summary(failed, len(results), run="nightly" if trigger == "nightly" else "backup-all")
+        if trigger == "nightly":
+            self.notifier.heartbeat(not failed, f"{len(results) - len(failed)}/{len(results)} stacks backed up"
+                                    + (f"; failed: {', '.join(failed)}" if failed else ""))
         return {"stacks": results, "failed": failed}
 
     # -- restore --------------------------------------------------------------------------------------------

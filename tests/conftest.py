@@ -82,8 +82,8 @@ class RecordingNotifier(Notifier):
     def heartbeat(self, ok, message):
         self.heartbeats.append((ok, message))
 
-    def summary(self, failed, total):
-        self.summaries.append((failed, total))
+    def summary(self, failed, total, run="nightly"):
+        self.summaries.append((failed, total, run))
 
 
 @pytest.fixture(scope="session")

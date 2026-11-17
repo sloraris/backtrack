@@ -69,15 +69,17 @@ class Notifier:
             post_json(self.webhook_url, {"event": "failure", "machine": self.machine, "stack": stack,
                                          "step": step, "error": error, "detail": detail[-4000:]})
 
-    def summary(self, failed: list[str], total: int) -> None:
+    def summary(self, failed: list[str], total: int, run: str = "nightly") -> None:
+        """One message for a run over every stack (`run` is nightly or backup-all), only when something failed."""
         if not failed:
             return
-        msg = f"Nightly run on {self.machine}: {len(failed)} of {total} stacks failed: {', '.join(failed)}"
+        label = "Nightly run" if run == "nightly" else "Back up all"
+        msg = f"{label} on {self.machine}: {len(failed)} of {total} stacks failed: {', '.join(failed)}"
         if self.discord_url:
             post_json(self.discord_url, {"username": "Backtrack", "content": msg[:1900]})
         if self.webhook_url:
-            post_json(self.webhook_url, {"event": "summary", "machine": self.machine, "failed": failed,
-                                         "total": total})
+            post_json(self.webhook_url, {"event": "summary", "run": run, "machine": self.machine,
+                                         "failed": failed, "total": total})
 
     def heartbeat(self, ok: bool, message: str) -> None:
         if not self.heartbeat_url:

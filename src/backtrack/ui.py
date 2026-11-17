@@ -9,6 +9,8 @@ from html import escape
 from importlib import resources
 from urllib.parse import quote
 
+from backtrack.hub import BACKUP_ALL_SINCE, older_than
+
 @cache
 def static(name: str) -> str:
     """URL of a file in static/, with a hash of its content so browsers fetch it again after an upgrade.
@@ -66,6 +68,7 @@ TOASTS = {
     "lease": ("success", "Maintenance agent changed", "Prune and repository checks now run there."),
     "prerestore": ("success", "Removal queued", "The agent checks the stack's health again before it deletes."),
     "revoked": ("success", "Token revoked", "Requests with it are refused from now on."),
+    "backup-all": ("success", "Back up all queued", "Each agent backs up its stacks one at a time."),
     "error": ("error", "That didn't work", ""),
 }
 
@@ -172,6 +175,57 @@ def post_button(action: str, label: str, csrf: str, cls: str = "bt-btn bt-btn--o
             f'<button class="{cls}" type="submit">{ICONS.get(icon, "")}{e(label)}</button></form>')
 
 
+def backup_all(agents: list[dict], csrf: str, machine: str | None = None) -> str:
+    """The Back up all button and its confirmation panel: which stacks stop, which stay up, who is skipped.
+
+    A popover, so it opens without JavaScript. One click confirms: a backup changes no data, but stop-mode
+    stacks go down while theirs runs, so the panel names them.
+    """
+    if machine:
+        agents = [a for a in agents if a["machine"] == machine]
+    old = [a["machine"] for a in agents if a.get("online") and older_than(a.get("version"), BACKUP_ALL_SINCE)]
+    ready = [a for a in agents if a.get("online") and a.get("stacks") and a["machine"] not in old]
+    if not ready:
+        return ""
+    rows, total = [], 0
+    for a in ready:
+        stacks = sorted(a["stacks"], key=lambda s: s["name"])
+        total += len(stacks)
+        stop = [s["name"] for s in stacks if s.get("mode") == "stop"]
+        live = [s["name"] for s in stacks if s.get("mode") != "stop"]
+        facts = []
+        if stop:
+            facts.append(f'<p class="bt-setting__desc">Stops while backed up: <span class="bt-code">'
+                         f'{e(", ".join(stop))}</span></p>')
+        if live:
+            facts.append(f'<p class="bt-setting__desc">Stays up: <span class="bt-code">{e(", ".join(live))}</span></p>')
+        busy = a.get("job") or a.get("queued")
+        note = " · queues behind the current job" if busy else ""
+        rows.append(f'<div class="bt-setting"><div class="bt-setting__text"><p class="bt-setting__title">'
+                    f'{e(a["machine"])} <span class="bt-muted bt-small">{len(stacks)} '
+                    f'stack{"s" if len(stacks) != 1 else ""}{e(note)}</span></p>{"".join(facts)}</div></div>')
+    skipped = [a["machine"] for a in agents if not a.get("online")]
+    skip = (f'<p class="bt-small bt-muted">Skipped, offline: {e(", ".join(skipped))}.</p>' if skipped else "")
+    if old:
+        skip += f'<p class="bt-small bt-muted">Skipped, older than 0.3.0: {e(", ".join(old))}.</p>'
+
+    pid = "bt-backup-all"
+    scope = (f"every stack on {machine}" if machine else "every stack")
+    order = ("one at a time" if machine or len(ready) == 1 else "one at a time on each agent; agents run side by side")
+    field = f'<input type="hidden" name="machine" value="{e(machine)}">' if machine else ""
+    return (f'<button class="bt-btn bt-btn--outline" type="button" popovertarget="{pid}">Back up all</button>'
+            f'<div class="bt-popover" id="{pid}" popover><div class="bt-stack">'
+            f'<h2 class="bt-h2">Back up {e(scope)} now?</h2>'
+            f'<p class="bt-small bt-muted">Backs up {e(order)}. Snapshots are tagged manual and count toward '
+            f'retention like nightly ones.</p>'
+            f'<div class="bt-settings">{"".join(rows)}</div>{skip}'
+            f'<form class="bt-cluster bt-cluster--end" method="post" action="/backup-all">'
+            f'<input type="hidden" name="csrf" value="{e(csrf)}">{field}'
+            f'<button class="bt-btn bt-btn--ghost" type="button" popovertarget="{pid}" popovertargetaction="hide">'
+            f'Cancel</button><button class="bt-btn bt-btn--primary" type="submit">'
+            f'Back up {total} stack{"s" if total != 1 else ""}</button></form></div></div>')
+
+
 # -- pages --------------------------------------------------------------------------------------------------------
 
 def login(error: str = "") -> str:
@@ -222,7 +276,7 @@ def stacks_page(agents: list[dict], snapshot_count: int | None, lease: dict | No
              f'<th>Last backup</th><th class="num">Added</th><th>State</th></tr></thead><tbody>{"".join(rows)}'
              f'</tbody></table></div>' if rows else
              empty("No stacks yet", "Stacks appear when a container has the backtrack.mode label."))
-    body = (header("Stacks", "fleet") + "".join(callout(*w) for w in warnings[:2])
+    body = (header("Stacks", "fleet", actions=backup_all(agents, csrf)) + "".join(callout(*w) for w in warnings[:2])
             + f'<div class="bt-grid bt-grid--4">{cards}</div>'
             + f'<section class="bt-card bt-card--flush">{table}</section>')
     return f'<main id="main" class="bt-page">{body}</main>'
@@ -378,7 +432,7 @@ def agent_page(agent: dict, settings: list[dict] | None, lease: dict | None, hub
              f'</p></div><div class="bt-setting__control">{lease_control}</div></div></div>')
     warn = callout("error", "Settings not saved", error) if error else ""
     state = "online" if agent.get("online") else "offline"
-    body = (header(m, f"agent · {state}", "Changes save as you make them.") + warn
+    body = (header(m, f"agent · {state}", "Changes save as you make them.", actions=backup_all([agent], csrf, m)) + warn
             + f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">Schedule'
             + f'</h2></div></div>{settings_html}</section>'
             + f'<section class="bt-section bt-section--card"><div class="bt-section__head"><div><h2 class="bt-h2">'

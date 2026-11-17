@@ -57,7 +57,7 @@ def wait_job(lab, job_id, timeout=60):
 
 
 def test_healthz_needs_no_auth(hub):
-    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.2.2"})
+    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.3.0"})
 
 
 def test_agent_api_requires_signature(hub):
@@ -139,9 +139,13 @@ def test_ui_login_csrf_and_pages(hub):
     csrf = html.split('name="csrf" value="')[1].split('"')[0]
     for path in ("/stacks/app", "/agents", "/agents/alpha", "/jobs", "/repository"):
         assert get(path)[0] == 200, path
+    assert "Back up all" in html and "Stops while backed up" in html and "Back up 1 stack<" in html
+    assert 'name="machine" value="alpha"' in get("/agents/alpha")[2]  # the agent page's own button
     assert post("/stacks/app/backup", {"trigger": "manual"})[0] == 403  # no CSRF token
     status, url, html = post("/stacks/app/backup", {"trigger": "manual", "csrf": csrf})
     assert status == 200 and "/jobs/alpha/" in url and "Backup queued" in html
+    status, url, html = post("/backup-all", {"csrf": csrf})
+    assert status == 200 and "/jobs/alpha/" in url and "Back up all queued" in html
     status, url, html = post("/agents/alpha/settings", {"KEEP": "daily=9", "csrf": csrf})
     assert "done=saved" in url and hub.cfg.get("KEEP") == "daily=9"
     status, url, _ = post("/repository/lease", {"machine": "alpha", "csrf": csrf})
@@ -255,3 +259,96 @@ def test_stack_detail(hub):
     assert body["mode"] == "stop" and body["also_on"] == [] and body["prerestore"] == []
     assert req(hub, "GET", "/api/v1/stacks/nope", headers=read)[0] == 404
     assert req(hub, "GET", "/api/v1/stacks/app")[0] == 401
+
+
+def test_backup_all_through_hub_api(hub):
+    auth = {"Authorization": "Bearer write-tok"}
+    assert req(hub, "POST", "/api/v1/backup-all", {"confirm": "all"},
+               headers={"Authorization": "Bearer read-tok"})[0] == 403
+    s, err = req(hub, "POST", "/api/v1/backup-all", {}, headers=auth)
+    assert s == 400 and '"all"' in err["error"]
+    s, body = req(hub, "POST", "/api/v1/backup-all", {"confirm": "all"}, headers=auth)
+    assert s == 202 and body["skipped"] == []
+    [started] = body["started"]
+    assert started["machine"] == "alpha" and started["stacks"] == ["app"] and started["job"]["kind"] == "backup-all"
+    job = wait_job(hub, started["job"]["id"])
+    assert job.state == "ok" and job.result["stacks"]["app"]["state"] == "ok"
+    assert hub.restic.latest("app").tag("trigger") == "manual"
+    assert hub.notifier.heartbeats == []
+    s, jobs = req(hub, "GET", "/api/v1/jobs?stack=", headers=auth)
+    assert jobs["jobs"][0]["kind"] == "backup-all" and jobs["jobs"][0]["trigger"] == "manual"
+    s, detail = req(hub, "GET", "/api/v1/stacks/app", headers=auth)
+    assert detail["last"]["state"] == "ok"  # counts as the stack's last backup, like the nightly run
+
+    # One agent: confirm with its name.
+    s, err = req(hub, "POST", "/api/v1/backup-all", {"machine": "alpha", "confirm": "all"}, headers=auth)
+    assert s == 400 and '"alpha"' in err["error"]
+    s, body = req(hub, "POST", "/api/v1/backup-all", {"machine": "alpha", "confirm": "alpha"}, headers=auth)
+    assert s == 202 and [x["machine"] for x in body["started"]] == ["alpha"]
+    wait_job(hub, body["started"][0]["job"]["id"])
+    assert req(hub, "POST", "/api/v1/backup-all", {"machine": "nope", "confirm": "nope"}, headers=auth)[0] == 404
+
+
+def test_agent_backup_all_runs_one_at_a_time(tmp_path, repo):
+    from backtrack.server import local_agent_call
+
+    lab = Lab(tmp_path, repo, machine="alpha")
+    service = Service(lab.cfg, lab.agent)  # runner not started: jobs stay queued
+    first = local_agent_call(service, "POST", "/v1/backup-all", {})
+    again = local_agent_call(service, "POST", "/v1/backup-all", {})
+    assert "existing" not in first and again["existing"] and again["job"]["id"] == first["job"]["id"]
+    assert first["job"]["params"] == {"trigger": "manual"}
+
+
+def test_hub_backup_all_skips_agents_it_cannot_use(hub):
+    from backtrack.hub import AgentUnreachable, Hub
+
+    stack = [{"name": "app", "mode": "stop"}]
+    fleet = [
+        {"machine": "alpha", "online": True, "version": "0.3.0", "stacks": stack},
+        {"machine": "beta", "online": False, "version": "0.3.0", "stacks": stack},
+        {"machine": "gamma", "online": True, "version": "0.3.0", "stacks": []},
+        {"machine": "delta", "online": True, "version": "0.2.2", "stacks": stack},
+        {"machine": "eps", "online": True, "version": "0.3.0", "stacks": stack},
+        {"machine": "zeta", "online": True, "version": "0.3.0", "stacks": stack},
+    ]
+    calls = []
+
+    def call(machine, method, path, body=None):
+        calls.append((machine, method, path))
+        if machine == "eps":
+            raise AgentUnreachable("eps: connection refused")
+        return {"job": {"id": machine}, **({"existing": True} if machine == "zeta" else {})}
+
+    h = Hub(hub.service, KEY)
+    h.agents = lambda: fleet
+    h.call = call
+    res = h.backup_all()
+    assert [s["machine"] for s in res["started"]] == ["alpha"]
+    reasons = {s["machine"]: s["reason"] for s in res["skipped"]}
+    assert reasons["beta"] == "offline" and reasons["gamma"] == "no stacks"
+    assert "0.3.0" in reasons["delta"] and "refused" in reasons["eps"] and "already" in reasons["zeta"]
+    assert {c[0] for c in calls} == {"alpha", "eps", "zeta"} and all(c[1:] == ("POST", "/v1/backup-all") for c in calls)
+
+    assert [s["machine"] for s in h.backup_all("alpha")["started"]] == ["alpha"]
+    with pytest.raises(LookupError):
+        h.backup_all("nope")
+
+
+def test_backup_all_panel_names_the_stacks_that_stop():
+    from backtrack import ui
+
+    agents = [{"machine": "alpha", "online": True, "version": "0.3.0", "stacks": [{"name": "db", "mode": "stop"},
+                                                             {"name": "web", "mode": "live"}]},
+              {"machine": "beta", "online": True, "job": {"kind": "backup"}, "stacks": [{"name": "app", "mode": "stop"}]},
+              {"machine": "gamma", "online": False, "stacks": [{"name": "old", "mode": "stop"}]},
+              {"machine": "delta", "online": True, "version": "0.2.2", "stacks": [{"name": "legacy", "mode": "stop"}]}]
+    html = ui.backup_all(agents, "tok")
+    assert "Stops while backed up: <span class=\"bt-code\">db</span>" in html
+    assert "Stays up: <span class=\"bt-code\">web</span>" in html
+    assert "queues behind the current job" in html and "Skipped, offline: gamma" in html
+    assert "Skipped, older than 0.3.0: delta" in html and "legacy" not in html
+    assert "Back up 3 stacks" in html and 'name="machine"' not in html
+    one = ui.backup_all(agents, "tok", "beta")
+    assert "every stack on beta" in one and 'name="machine" value="beta"' in one and "db" not in one
+    assert ui.backup_all(agents, "tok", "gamma") == ""  # offline: no button

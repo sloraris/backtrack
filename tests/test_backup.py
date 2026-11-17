@@ -139,8 +139,24 @@ def test_nightly_continues_after_a_failure_and_reports(lab):
     assert result["failed"] == ["b"]
     assert result["stacks"]["a"]["state"] == "ok" and result["stacks"]["c"]["state"] == "ok"
     assert lab.notifier.heartbeats == [(False, "2/3 stacks backed up; failed: b")]
-    assert lab.notifier.summaries == [(["b"], 3)]
+    assert lab.notifier.summaries == [(["b"], 3, "nightly")]
     assert lab.restic.latest("a").tag("trigger") == "nightly"
+
+
+def test_backup_all_is_tagged_manual_and_skips_the_heartbeat(lab):
+    lab.stack_dir("a")
+    lab.docker.add("a", "web", {L_MODE: "live"})
+    lab.docker.add("b", "web", {L_MODE: "live"})  # no folder -> fails
+    lab.stack_dir("c")
+    lab.docker.add("c", "web", {L_MODE: "stop"})
+    result = lab.agent.backup_all(lab.job("backup-all"))
+    assert result["failed"] == ["b"] and result["stacks"]["c"]["state"] == "ok"
+    assert ("stop", "c-web") in lab.docker.calls and lab.docker.items[2].running
+    assert lab.restic.latest("a").tag("trigger") == "manual"
+    assert lab.restic.latest("c").tag("trigger") == "manual"
+    assert lab.notifier.heartbeats == []
+    assert lab.notifier.summaries == [(["b"], 3, "backup-all")]
+    assert [f[0] for f in lab.notifier.failures] == ["b"]
 
 
 def test_misconfigured_stack_is_reported(lab):

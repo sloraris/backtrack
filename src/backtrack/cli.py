@@ -47,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("backup", help="back up one stack now")
     b.add_argument("stack")
     b.add_argument("--trigger", choices=["manual", "pre-migrate"], default="manual")
-    sub.add_parser("nightly", help="back up every stack now, as the nightly run would")
+    sub.add_parser("nightly", help="back up every stack now, as the nightly run would (pings the heartbeat)")
+    sub.add_parser("backup-all", help="back up every stack now, tagged manual, without the heartbeat")
     r = sub.add_parser("restore", help="restore a stack in place")
     r.add_argument("stack")
     r.add_argument("--snapshot", default="latest")
@@ -133,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(lambda j: agent.backup(args.stack, j, args.trigger), _job("backup", args.stack))
     if args.cmd == "nightly":
         return _run(agent.nightly, _job("nightly"))
+    if args.cmd == "backup-all":
+        return _run(agent.backup_all, _job("backup-all"))
     if args.cmd == "restore":
         if not args.yes and not _confirm(f"Restore {args.stack} from {args.snapshot}? The current folder is kept as "
                                          f"{args.stack}.pre-restore. Type the stack name to continue: ", args.stack):

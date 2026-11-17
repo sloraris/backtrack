@@ -50,6 +50,7 @@ class Service:
             "backup": lambda j: a.backup(stack, j, params.get("trigger", "manual")),
             "restore": lambda j: a.restore(stack, j, params.get("snapshot", "latest")),
             "nightly": a.nightly,
+            "backup-all": a.backup_all,
             "prune": a.prune,
             "monthly": a.monthly,
             "restore-test": lambda j: a.restore_test(j, stack),
@@ -59,8 +60,14 @@ class Service:
         return self.runner.submit(kind, stack, fns[kind], params)
 
     def busy_with(self, kind: str) -> bool:
+        return self.pending(kind) is not None
+
+    def pending(self, kind: str) -> Job | None:
+        """The running or queued job of this kind, if there is one."""
         cur = self.runner.current
-        return bool((cur and cur.kind == kind) or any(j.kind == kind for j in self.runner.queued()))
+        if cur and cur.kind == kind:
+            return cur
+        return next((j for j in self.runner.queued() if j.kind == kind), None)
 
     # -- loops ----------------------------------------------------------------------------------------------
     def start(self) -> None:

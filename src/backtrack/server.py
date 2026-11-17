@@ -74,6 +74,12 @@ def local_agent_call(service, method: str, path: str, body: dict | None) -> dict
             return {"settings": service.cfg.settings()}
     if method == "GET" and parts == ["prerestore"]:
         return {"folders": service.agent.prerestore()}
+    if method == "POST" and parts == ["backup-all"]:
+        # One at a time: a second request while one is queued or running gets that job back.
+        existing = service.pending("backup-all")
+        if existing:
+            return {"job": existing.to_dict(), "existing": True}
+        return {"job": service.submit("backup-all", trigger="manual").to_dict()}
     if method == "POST" and parts[:1] == ["stacks"] and parts[2:] == ["prerestore", "remove"]:
         stack = _stack_name(parts[1])
         path = str(body.get("path") or "")
@@ -290,6 +296,22 @@ def make_handler(service, hub: Hub | None):
                         return self._json(200, hub.call(parts[1], "GET", f"/v1/jobs/{parts[2]}"))
                     except AgentUnreachable as e:
                         raise ApiError(502, str(e)) from e
+            if method == "POST" and parts == ["backup-all"]:
+                if scope != "write":
+                    raise ApiError(403, "this token is read-only")
+                data = json.loads(body or b"{}")
+                machine = str(data.get("machine") or "")
+                want = machine or "all"
+                if data.get("confirm") != want:
+                    raise ApiError(400, f'set "confirm" to "{want}" to back up '
+                                        + (f"every stack on {machine}" if machine else "every stack"))
+                try:
+                    res = hub.backup_all(machine or None)
+                except LookupError as e:
+                    raise ApiError(404, str(e)) from e
+                if not res["started"]:
+                    return self._json(409, {"error": "nothing started: " + _skipped_text(res["skipped"]), **res})
+                return self._json(202, res)
             if method == "POST" and parts[:1] == ["stacks"] and parts[2:] == ["prerestore", "remove"]:
                 if scope != "write":
                     raise ApiError(403, "this token is read-only")
@@ -428,6 +450,24 @@ def make_handler(service, hub: Hub | None):
                         machine, res = hub.backup(stack, trigger)
                         return self._redirect(f"/jobs/{machine}/{res['job']['id']}?done="
                                               f"{'migrate' if trigger == 'pre-migrate' else 'backup'}")
+                    if parts == ["backup-all"]:
+                        machine = form.get("machine") or None
+                        back = f"/agents/{ui.u(machine)}" if machine else "/"
+                        try:
+                            res = hub.backup_all(machine)
+                        except LookupError as e:
+                            return self._redirect(f"/?done=error&detail={_q(str(e))}")
+                        started, skipped = res["started"], res["skipped"]
+                        if not started:
+                            return self._redirect(f"{back}?done=error&detail="
+                                                  + _q("Nothing started: " + _skipped_text(skipped)))
+                        if len(started) == 1 and not skipped:
+                            m, job_id = started[0]["machine"], started[0]["job"]["id"]
+                            return self._redirect(f"/jobs/{ui.u(m)}/{ui.u(job_id)}?done=backup-all")
+                        detail = "Queued on " + ", ".join(s["machine"] for s in started) + "."
+                        if skipped:
+                            detail += " Skipped: " + _skipped_text(skipped) + "."
+                        return self._redirect(f"/jobs?done=backup-all&detail={_q(detail)}")
                     if len(parts) == 3 and parts[0] == "stacks" and parts[2] == "restore":
                         stack = _stack_name(parts[1])
                         if form.get("confirm") != stack:
@@ -475,6 +515,10 @@ def make_handler(service, hub: Hub | None):
             raise ApiError(404, "not found")
 
     return Handler
+
+
+def _skipped_text(skipped: list[dict]) -> str:
+    return "; ".join(f"{s['machine']} ({s['reason']})" for s in skipped) or "no agents"
 
 
 def _q(s: str) -> str:

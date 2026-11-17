@@ -109,6 +109,8 @@ docker exec backtrack backtrack snapshots myapp
 docker exec backtrack backtrack restore-test
 docker exec backtrack backtrack prerestore list              # folders restores set aside, and whether they're safe
 docker exec -it backtrack backtrack prerestore remove myapp  # removes the stack's safe ones; --path for one
+docker exec backtrack backtrack token create dashboard       # hub only; --scope write; printed once
+docker exec backtrack backtrack token list                   # and: token revoke <id|name>
 ```
 
 Commands and the scheduler share a lock, so two jobs never run at once on one host.
@@ -123,11 +125,27 @@ Commands and the scheduler share a lock, so two jobs never run at once on one ho
 
 ## API
 
-`/api/v1` on the hub, with `Authorization: Bearer <READ_TOKEN|WRITE_TOKEN>`:
-`GET /status`, `GET /agents`, `GET /stacks`, `GET /stacks/{stack}/snapshots`, `GET /jobs/{machine}/{id}`,
-`POST /stacks/{stack}/backup` (`{"trigger":"manual"|"pre-migrate"}`) and
-`POST /stacks/{stack}/restore` (`{"snapshot":"latest"|ID,"confirm":"<stack>"}`), `GET /prerestore` and
-`POST /stacks/{stack}/prerestore/remove` (`{"path":"…","confirm":"<stack>"}`). `/healthz` needs no token.
+`/api/v1` on the hub, with `Authorization: Bearer <token>`. Give each tool that calls it its own token: create
+one under **Settings → API tokens** in the hub (or `backtrack token create <name> --scope read|write`). It is
+shown once; the hub keeps only a hash, records when it was last used, and lets you revoke it. The static
+`READ_TOKEN` and `WRITE_TOKEN` from the environment also work. `/healthz` needs no token.
+
+| Method | Path | Scope |
+|---|---|---|
+| GET | `/status` | read |
+| GET | `/agents` | read |
+| GET | `/stacks` | read |
+| GET | `/stacks/{stack}` | read |
+| GET | `/stacks/{stack}/snapshots` | read |
+| GET | `/jobs?limit=&machine=&stack=&state=` | read |
+| GET | `/jobs/{machine}/{id}` | read |
+| GET | `/prerestore` | read |
+| POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
+| POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
+| POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>"}` | write |
+
+A dashboard, monitor or assistant that only reports needs a read token: `/status` for the overview, `/stacks`
+for each stack's last backup, and `/jobs?state=failed` for what went wrong and why.
 
 ## Development
 

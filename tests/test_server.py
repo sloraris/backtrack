@@ -210,3 +210,48 @@ def test_static_urls_carry_a_content_hash(hub):
         assert url.startswith(f"/static/{name}?v=") and len(url.split("=")[1]) == 10 and url in html
         with urllib.request.urlopen(hub.base + url, timeout=10) as r:  # the server ignores the query
             assert r.status == 200
+
+
+def test_job_list_with_filters(hub):
+    auth = {"Authorization": "Bearer write-tok"}
+    hub.stack_dir("db", {"f": "2"})
+    hub.docker.add("db", "postgres", {L_MODE: "stop"})
+    ids = []
+    for stack in ("app", "db", "app"):
+        s, body = req(hub, "POST", f"/api/v1/stacks/{stack}/backup", {"trigger": "manual"}, headers=auth)
+        ids.append(body["job"]["id"])
+        wait_job(hub, ids[-1])
+    s, body = req(hub, "POST", "/api/v1/stacks/app/restore", {"snapshot": "deadbeef", "confirm": "app"}, headers=auth)
+    ids.append(body["job"]["id"])
+    assert wait_job(hub, ids[-1]).state == "failed"
+
+    read = {"Authorization": "Bearer read-tok"}
+    s, body = req(hub, "GET", "/api/v1/jobs", headers=read)
+    assert s == 200 and body["unreachable"] == []
+    assert [j["id"] for j in body["jobs"]] == ids[::-1]
+    first = body["jobs"][-1]
+    assert {k: first[k] for k in ("machine", "kind", "stack", "trigger", "state", "error")} == {
+        "machine": "alpha", "kind": "backup", "stack": "app", "trigger": "manual", "state": "ok", "error": None}
+    assert first["started"] and first["finished"] >= first["started"] and "log" not in first
+    assert body["jobs"][0]["kind"] == "restore" and body["jobs"][0]["error"]
+
+    assert [j["id"] for j in req(hub, "GET", "/api/v1/jobs?limit=2", headers=read)[1]["jobs"]] == ids[:1:-1]
+    assert [j["id"] for j in req(hub, "GET", "/api/v1/jobs?stack=db", headers=read)[1]["jobs"]] == [ids[1]]
+    assert [j["id"] for j in req(hub, "GET", "/api/v1/jobs?state=failed", headers=read)[1]["jobs"]] == [ids[3]]
+    assert [j["id"] for j in req(hub, "GET", "/api/v1/jobs?stack=app&state=ok&limit=1",
+                                 headers=read)[1]["jobs"]] == [ids[2]]
+    assert len(req(hub, "GET", "/api/v1/jobs?machine=alpha", headers=read)[1]["jobs"]) == 4
+    assert req(hub, "GET", "/api/v1/jobs?machine=nope", headers=read)[0] == 404
+    assert req(hub, "GET", "/api/v1/jobs?state=weird", headers=read)[0] == 400
+    assert req(hub, "GET", "/api/v1/jobs?limit=x", headers=read)[0] == 400
+    assert req(hub, "GET", "/api/v1/jobs?stack=../x", headers=read)[0] == 400
+    assert req(hub, "GET", "/api/v1/jobs")[0] == 401
+
+
+def test_stack_detail(hub):
+    read = {"Authorization": "Bearer read-tok"}
+    s, body = req(hub, "GET", "/api/v1/stacks/app", headers=read)
+    assert s == 200 and body["name"] == "app" and body["machine"] == "alpha" and body["agent_online"] is True
+    assert body["mode"] == "stop" and body["also_on"] == [] and body["prerestore"] == []
+    assert req(hub, "GET", "/api/v1/stacks/nope", headers=read)[0] == 404
+    assert req(hub, "GET", "/api/v1/stacks/app")[0] == 401

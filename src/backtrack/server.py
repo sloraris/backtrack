@@ -18,8 +18,10 @@ from urllib.parse import parse_qs, urlsplit
 
 from backtrack import __version__, ui
 from backtrack.hub import AgentUnreachable, Hub
+from backtrack.jobs import HISTORY
 from backtrack.signing import Verifier
 from backtrack.stacks import NAME_RE
+from backtrack.tokens import TokenStore
 
 log = logging.getLogger("backtrack")
 SESSION_TTL = 12 * 3600
@@ -51,7 +53,12 @@ def local_agent_call(service, method: str, path: str, body: dict | None) -> dict
     if method == "GET" and parts == ["stacks"]:
         return {"stacks": service.presence()["stacks"]}
     if method == "GET" and parts == ["jobs"]:
-        return {"jobs": [j.to_dict() for j in service.runner.recent(50)]}
+        query = parse_qs(urlsplit(path).query)
+        try:
+            limit = max(1, min(HISTORY, int((query.get("limit") or ["50"])[0])))
+        except ValueError:
+            raise ApiError(400, "limit must be a number") from None
+        return {"jobs": [j.to_dict() for j in service.runner.recent(limit)]}
     if method == "GET" and len(parts) == 2 and parts[0] == "jobs":
         job = service.runner.get(parts[1])
         if not job:
@@ -132,6 +139,11 @@ def make_handler(service, hub: Hub | None):
     cfg = service.cfg
     verifier = Verifier(cfg.get("CLUSTER_KEY"))
     sessions = Sessions()
+    tokens = TokenStore(cfg.state_dir)
+
+    def _settings(csrf: str, new=None, error: str = "") -> str:
+        env = [k for k in ("READ_TOKEN", "WRITE_TOKEN") if cfg.get(k)]
+        return ui.settings_page([t.public() for t in tokens.list()], env, csrf, new, error)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "backtrack"
@@ -182,13 +194,16 @@ def make_handler(service, hub: Hub | None):
             auth = self.headers.get("Authorization", "")
             if not auth.startswith("Bearer "):
                 return None
-            given = auth[7:].strip().encode()
+            given = auth[7:].strip()
+            if not given:
+                return None
+            raw = given.encode()
             write, read = cfg.get("WRITE_TOKEN").encode(), cfg.get("READ_TOKEN").encode()
-            if write and hmac.compare_digest(given, write):
+            if write and hmac.compare_digest(raw, write):
                 return "write"
-            if read and hmac.compare_digest(given, read):
+            if read and hmac.compare_digest(raw, read):
                 return "read"
-            return None
+            return tokens.check(given)
 
         # -- dispatch ---------------------------------------------------------------------------------------
         def do_GET(self):
@@ -217,7 +232,7 @@ def make_handler(service, hub: Hub | None):
                 if path.startswith("/static/"):
                     return self._static(path[len("/static/"):])
                 if path.startswith("/api/v1/"):
-                    return self._hub_api(method, path[len("/api/v1"):], body)
+                    return self._hub_api(method, path[len("/api/v1"):], body, parse_qs(url.query))
                 return self._ui(method, path, parse_qs(url.query), body)
             except ApiError as e:
                 if path.startswith(("/v1/", "/api/")) or not hub:
@@ -236,7 +251,7 @@ def make_handler(service, hub: Hub | None):
             self._json(status, local_agent_call(service, method, raw_path, data))
 
         # -- hub public API ---------------------------------------------------------------------------------
-        def _hub_api(self, method: str, path: str, body: bytes) -> None:
+        def _hub_api(self, method: str, path: str, body: bytes, query: dict) -> None:
             scope = self._token_scope()
             csrf = sessions.get(self._cookie())
             if not scope and csrf:
@@ -262,6 +277,10 @@ def make_handler(service, hub: Hub | None):
                 if parts == ["stacks"]:
                     return self._json(200, {"stacks": [{**s, "machine": a["machine"], "agent_online": a.get("online")}
                                                        for a in hub.agents() for s in a.get("stacks", [])]})
+                if len(parts) == 2 and parts[0] == "stacks":
+                    return self._json(200, _stack_detail(hub, _stack_name(parts[1])))
+                if parts == ["jobs"]:
+                    return self._json(200, _job_list(hub, query))
                 if len(parts) == 3 and parts[0] == "stacks" and parts[2] == "snapshots":
                     return self._json(200, {"snapshots": hub.snapshots(_stack_name(parts[1]))})
                 if parts == ["prerestore"]:
@@ -393,6 +412,8 @@ def make_handler(service, hub: Hub | None):
                     except AgentUnreachable as e:
                         raise ApiError(502, str(e)) from e
                     return render(job.get("kind", "Job"), "jobs", ui.job_page(parts[1], job))
+                if parts == ["settings"]:
+                    return render("Settings", "settings", _settings(csrf))
                 if parts == ["repository"]:
                     count, stacks = hub.snapshot_count()
                     lease = hub.share.lease()
@@ -430,6 +451,20 @@ def make_handler(service, hub: Hub | None):
                         except (AgentUnreachable, ApiError) as e:
                             return self._redirect(f"/agents/{parts[1]}?done=error&detail={_q(str(e))}")
                         return self._redirect(f"/agents/{parts[1]}?done=saved")
+                    if parts == ["settings", "tokens"]:
+                        try:
+                            tok, secret = tokens.create(form.get("name", ""), form.get("scope", ""))
+                        except ValueError as e:
+                            return render("Settings", "settings", _settings(csrf, error=str(e)))
+                        log.info("API token %s (%s) created in the UI", tok.name, tok.scope)
+                        # Rendered, not redirected: the secret must not travel in a URL.
+                        return render("Settings", "settings", _settings(csrf, new=(tok.public(), secret)))
+                    if len(parts) == 4 and parts[:2] == ["settings", "tokens"] and parts[3] == "revoke":
+                        gone = tokens.revoke(parts[2])
+                        if not gone:
+                            return self._redirect("/settings?done=error&detail=No+such+token.")
+                        log.info("API token %s revoked in the UI", gone.name)
+                        return self._redirect("/settings?done=revoked")
                     if parts == ["repository", "lease"]:
                         hub.assign_lease(form.get("machine", ""))
                         back = self.headers.get("Referer", "")
@@ -445,6 +480,57 @@ def make_handler(service, hub: Hub | None):
 def _q(s: str) -> str:
     from urllib.parse import quote_plus
     return quote_plus(s[:300])
+
+
+# Jobs only the scheduler starts; the rest come from the UI or the API.
+SCHEDULED_KINDS = {"nightly", "prune", "monthly", "prerestore-auto-remove"}
+JOB_STATES = {"queued", "running", "ok", "failed"}
+
+
+def _job_list(hub: Hub, query: dict) -> dict:
+    """GET /api/v1/jobs: recent jobs across agents, newest first, filtered by machine, stack and state."""
+    def arg(name: str) -> str:
+        return (query.get(name) or [""])[0].strip()
+
+    try:
+        limit = max(1, min(HISTORY, int(arg("limit") or 50)))
+    except ValueError:
+        raise ApiError(400, "limit must be a number") from None
+    machine, stack, state = arg("machine"), arg("stack"), arg("state")
+    if stack:
+        _stack_name(stack)
+    if state and state not in JOB_STATES:
+        raise ApiError(400, f"state must be one of {', '.join(sorted(JOB_STATES))}")
+    if machine and not hub.agent(machine):
+        raise ApiError(404, f"no agent {machine}")
+    # With a filter, ask each agent for its whole history so the filter still finds `limit` matches.
+    filtered = bool(stack or state)
+    jobs, unreachable = hub.jobs(limit=None if filtered else limit,
+                                 per_agent=HISTORY if filtered else limit, machine=machine or None)
+    out = []
+    for m, j in jobs:
+        if (stack and j.get("stack") != stack) or (state and j.get("state") != state):
+            continue
+        params = j.get("params") or {}
+        out.append({"machine": m, "id": j.get("id"), "kind": j.get("kind"), "stack": j.get("stack"),
+                    "trigger": params.get("trigger") or ("schedule" if j.get("kind") in SCHEDULED_KINDS else "manual"),
+                    "state": j.get("state"), "created": j.get("created"), "started": j.get("started"),
+                    "finished": j.get("finished"), "error": j.get("error")})
+        if len(out) >= limit:
+            break
+    return {"jobs": out, "unreachable": unreachable}
+
+
+def _stack_detail(hub: Hub, name: str) -> dict:
+    """GET /api/v1/stacks/{stack}: the stack as its agent reports it, plus where it runs and its set-aside folders."""
+    found = hub.find_stack(name)
+    if not found:
+        raise ApiError(404, f"no agent reports a stack named {name}")
+    stack, agent = found
+    others = sorted(a["machine"] for a in hub.agents() if a["machine"] != agent["machine"]
+                    and any(s["name"] == name for s in a.get("stacks", [])))
+    return {**stack, "machine": agent["machine"], "agent_online": bool(agent.get("online")),
+            "also_on": others, "prerestore": hub.prerestore(name)}
 
 
 def _public_agent(a: dict) -> dict:

@@ -38,16 +38,23 @@ class Hub:
         agents[self.cfg.machine] = {**self.service.presence(), "machine": self.cfg.machine, "online": True}
         return [agents[k] for k in sorted(agents)]
 
-    def find_stack(self, name: str) -> tuple[dict, dict] | None:
-        """(stack, agent) for the online agent that has the stack; offline ones only as a fallback."""
-        found = None
+    def find_stack(self, name: str, machine: str | None = None) -> tuple[dict, dict] | None:
+        """(stack, agent) for the agent that has the stack, or the one on `machine`.
+
+        Preferred: an online agent where the stack has containers; then an online agent that only remembers it
+        (state `absent`, after `compose down` or a move); offline agents last.
+        """
+        found = []
         for a in self.agents():
+            if machine and a["machine"] != machine:
+                continue
             for s in a.get("stacks", []):
                 if s["name"] == name:
-                    if a.get("online"):
-                        return s, a
-                    found = found or (s, a)
-        return found
+                    found.append((not a.get("online"), s.get("state") == "absent", a["machine"], s, a))
+        if not found:
+            return None
+        best = min(found, key=lambda f: f[:3])
+        return best[3], best[4]
 
     def agent(self, machine: str) -> dict | None:
         return next((a for a in self.agents() if a["machine"] == machine), None)
@@ -147,7 +154,7 @@ class Hub:
         started, skipped = [], []
         for a in agents:
             m = a["machine"]
-            names = [s["name"] for s in a.get("stacks", [])]
+            names = [s["name"] for s in a.get("stacks", []) if s.get("state") != "absent"]  # agents skip those
             reason = None
             if not a.get("online"):
                 reason = "offline"
@@ -231,6 +238,15 @@ class Hub:
         if older_than(a.get("version"), BULK_SINCE):
             return f"{machine} runs {a.get('version')}; bulk actions need 0.4.0 or later"
         return None
+
+    def untrack(self, stack: str, machine: str) -> dict:
+        """Ask `machine` to stop listing a stack whose containers are gone from it. Snapshots stay."""
+        found = self.find_stack(stack, machine)
+        if not found:
+            raise LookupError(f"{machine} doesn't report a stack named {stack}")
+        if found[0].get("state") != "absent":
+            raise LookupError(f"{stack} still has containers on {machine}")
+        return self.call(machine, "POST", f"/v1/stacks/{stack}/untrack", {})
 
     def restore(self, stack: str, snapshot: str) -> tuple[str, dict]:
         found = self.find_stack(stack)

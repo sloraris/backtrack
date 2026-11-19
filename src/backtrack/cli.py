@@ -8,6 +8,7 @@ import logging
 import signal
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from backtrack import __version__
@@ -47,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("backup", help="back up one stack now")
     b.add_argument("stack")
     b.add_argument("--trigger", choices=["manual", "pre-migrate"], default="manual")
+    b.add_argument("--path", type=Path, help="data folder of a stack this agent has never seen (no containers, "
+                   "not remembered)")
     sub.add_parser("nightly", help="back up every stack now, as the nightly run would (pings the heartbeat)")
     sub.add_parser("backup-all", help="back up every stack now, tagged manual, without the heartbeat")
     r = sub.add_parser("restore", help="restore a stack in place")
@@ -64,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     ck = sub.add_parser("check", help="restic check with a data subset")
     ck.add_argument("--force", action="store_true")
     ck.add_argument("--subset")
+    ut = sub.add_parser("untrack", help="stop listing a stack whose containers are gone from this machine "
+                        "(its snapshots stay)")
+    ut.add_argument("stack")
     fs = sub.add_parser("forget-stack", help="delete every snapshot of a stack that no longer exists")
     fs.add_argument("stack")
     fs.add_argument("--yes", action="store_true")
@@ -123,7 +129,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         for s in stacks:
-            print(f"{s.name:24} {s.mode or '-':5} {s.state:8} {s.path}" + (f"  ERROR: {s.error}" if s.error else ""))
+            seen = f"  last seen {datetime.fromtimestamp(s.last_seen):%Y-%m-%d %H:%M}" if s.last_seen else ""
+            print(f"{s.name:24} {s.mode or '-':5} {s.state:8} {s.path}{seen}"
+                  + (f"  ERROR: {s.error}" if s.error else ""))
         return 0
     if args.cmd == "snapshots":
         for s in agent.restic.snapshots(args.stack):
@@ -131,7 +139,9 @@ def main(argv: list[str] | None = None) -> int:
                   f"{s.tag('trigger') or '-'}")
         return 0
     if args.cmd == "backup":
-        return _run(lambda j: agent.backup(args.stack, j, args.trigger), _job("backup", args.stack))
+        return _run(lambda j: agent.backup(args.stack, j, args.trigger, args.path), _job("backup", args.stack))
+    if args.cmd == "untrack":
+        return _run(lambda _j: agent.untrack(args.stack), _job("untrack", args.stack))
     if args.cmd == "nightly":
         return _run(agent.nightly, _job("nightly"))
     if args.cmd == "backup-all":

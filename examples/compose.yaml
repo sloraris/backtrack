@@ -3,7 +3,7 @@
 name: backtrack
 services:
   agent:
-    image: ghcr.io/sloraris/backtrack:0.4.0
+    image: ghcr.io/sloraris/backtrack:0.4.1
     container_name: backtrack      # `docker exec backtrack backtrack auto-restore <stack>` relies on this name
     restart: unless-stopped
     # A restore must not be cut in half: give the running job time to finish on shutdown.

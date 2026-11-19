@@ -6,7 +6,7 @@ Backtrack backs up Docker Compose stacks with restic. Every Docker host runs one
 write to one shared restic repo. One agent can also run the hub: a web UI and API for the whole fleet. Agents
 never depend on the hub, the management plane (Komodo, Portainer, ...) or each other to back up and restore.
 
-Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1; snapshot times with a UTC offset fixed in v0.2.2; Back up all, named API tokens and the job list in v0.3.0; bulk actions on selected stacks in v0.4.0**. Decisions are recorded in [Decisions](#decisions).
+Status: **v2, approved 2026-11-15; implemented in v0.1.0, fixed after a real-host test in v0.1.1; set-aside folder tracking in v0.2.0; logo cache fix and the bare mark as favicon in v0.2.1; snapshot times with a UTC offset fixed in v0.2.2; Back up all, named API tokens and the job list in v0.3.0; bulk actions on selected stacks in v0.4.0; stacks remembered after their containers are removed in v0.4.1**. Decisions are recorded in [Decisions](#decisions).
 
 ## Project
 
@@ -116,6 +116,17 @@ project; if two containers disagree, the stack is reported as misconfigured and 
 - A stack whose folder is missing or empty is reported as an error and never backed up: an empty "latest"
   snapshot would make the next auto-restore wipe the stack.
 - Stopped stacks are backed up and left stopped.
+- The agent remembers every stack it has seen, with its labels, in `<STATE_DIR>/known-stacks.json`. When
+  `docker compose down` (or a move to another host) removes the containers, the stack stays listed with state
+  `absent`, using the remembered labels. Backing it up by name (CLI, hub, API or a bulk selection) snapshots the
+  folder as it is, with nothing to stop. Nightly and Back up all skip absent stacks: nothing runs, so nothing
+  changed, and after a move the old host's copy must not become the newest snapshot. For the same reason, a
+  backup of an absent stack is refused while another agent reports the stack running.
+- A remembered copy is replaced whenever the stack has containers again, but never by labels with an error. It is
+  dropped when the project still has containers but no `backtrack.mode` (opted out), or with `backtrack untrack`
+  (or **Untrack** in the hub) once the stack is gone from that host for good. Snapshots stay either way.
+- `backtrack backup <stack> --path /abs/folder` backs up a folder for a stack the agent has never seen (live
+  mode, nothing to stop). For a stack it knows, the path must match the stack's own folder.
 - A stack that no longer exists on any host keeps its snapshots until removed with `backtrack forget-stack`.
 - Hook URLs often carry tokens. Use compose interpolation (`${VAR}` from the secrets file) so they stay out of
   git; they are still visible in `docker inspect`, like any env value.
@@ -348,6 +359,7 @@ Hub API (bearer token or session), under `/api/v1`:
 | GET | `/jobs/{machine}/{id}` | read: one job with its log |
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
+| POST | `/stacks/{stack}/untrack` `{"machine":"<agent>"}` | write: that agent stops listing an absent stack; 404 while the stack still has containers there. Snapshots stay |
 | POST | `/backup-all` `{"confirm":"all"}` or `{"machine":"<agent>","confirm":"<agent>"}` | write: queues a `backup-all` job on every online agent (or that one). 202 with `started` (`machine`, `job`, `stacks`) and `skipped` (`machine`, `reason`); 409 with the same lists when nothing started |
 | POST | `/bulk/backup` `{"stacks":["…"]}` | write: one `bulk-backup` job per agent with its share of the stacks. 202 with `started` (`machine`, `job`, `stacks`, `existing` when the same request was already queued) and `skipped` (`stack`, `machine` when known, `reason`); 409 with the same lists when nothing started. At most 500 stacks |
 | POST | `/bulk/prerestore-remove` `{"stacks":["…"],"confirm":"remove"}` | write: removes the stacks' set-aside folders that are safe to remove, one job per agent that has some; answers like `/bulk/backup` |
@@ -366,7 +378,7 @@ a log.
 name: backtrack
 services:
   agent:
-    image: ghcr.io/sloraris/backtrack:0.4.0
+    image: ghcr.io/sloraris/backtrack:0.4.1
     container_name: backtrack
     restart: unless-stopped
     environment:
@@ -448,3 +460,4 @@ CI: tests on every push and PR; image build and push to GHCR from `main` and tag
 | 16 | Set-aside folders are recorded and removed only on request (or opt-in auto-remove) once the stack is healthy and the safety snapshot exists. |
 | 17 | Back up all reuses the nightly loop as its own `backup-all` job: tagged manual, no heartbeat (it must not hide a missed scheduled run), one per agent at a time, agents in parallel; busy agents queue it, offline ones are skipped. The UI confirms with one click after naming the stacks that stop; the API needs `confirm` (`all` or the agent). |
 | 18 | Bulk actions on stacks selected in the hub: back up, and remove safe set-aside folders; no bulk restore. One job per agent with its share of the stacks. Select-all replaces the overview's Back up all button; an agent's page keeps its own. A review page names what happens before anything runs; removal needs `remove` typed. `/api/v1/backup-all` stays for 0.3.0 clients. |
+| 19 | Agents remember the stacks they have seen, so a stack whose containers were removed stays listed as `absent` and can be backed up by hand. Nightly and Back up all skip absent stacks, and a backup of one is refused while another agent runs the stack, so an old copy never becomes the latest snapshot. The hub routes a stack to the agent where it has containers, and Untrack drops a remembered stack per agent. |

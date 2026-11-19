@@ -103,6 +103,8 @@ them, and are saved on that agent.
 ```bash
 docker exec backtrack backtrack list
 docker exec backtrack backtrack backup myapp                 # --trigger pre-migrate before moving a stack
+docker exec backtrack backtrack backup myapp --path /srv/myapp   # a folder this agent has never seen
+docker exec backtrack backtrack untrack myapp                # stop listing a stack removed from this host
 docker exec backtrack backtrack backup-all                   # every stack on this host now, e.g. before a risky change
 docker exec -it backtrack backtrack restore myapp            # --snapshot <id>; asks you to type the name
 docker exec backtrack backtrack auto-restore myapp           # exit 0: restored, had data, or starts fresh
@@ -116,11 +118,17 @@ docker exec backtrack backtrack token list                   # and: token revoke
 
 Commands and the scheduler share a lock, so two jobs never run at once on one host.
 
+The agent remembers the stacks it has seen. After `docker compose down` removes a stack's containers, it stays
+listed as **not deployed** and can still be backed up by hand, for example before an update or a move. Nightly
+runs skip it. Untrack it once it's gone from that host for good; its snapshots stay.
+
 ## Moving a stack
 
 1. In the hub, choose **Back up for migration** on the stack (or run `backup --trigger pre-migrate`). The stack
    starts again afterwards.
-2. Stop or remove the stack on the old host using your management plane.
+2. Stop or remove the stack on the old host using your management plane. If you removed it first, the old
+   host's agent still remembers it, so **Back up for migration** works afterwards too, as long as the stack isn't
+   running anywhere else yet.
 3. Deploy it on the new host. Auto-restore fills the folder from that backup. It refuses while the old host's
    agent still reports the stack running, so the stack never runs in two places with diverging data.
 
@@ -143,6 +151,7 @@ shown once; the hub keeps only a hash, records when it was last used, and lets y
 | GET | `/prerestore` | read |
 | POST | `/stacks/{stack}/backup` `{"trigger":"manual"\|"pre-migrate"}` | write |
 | POST | `/stacks/{stack}/restore` `{"snapshot":"latest"\|ID,"confirm":"<stack>"}` | write |
+| POST | `/stacks/{stack}/untrack` `{"machine":"<agent>"}` | write |
 | POST | `/stacks/{stack}/prerestore/remove` `{"path":"…","confirm":"<stack>"}` | write |
 | POST | `/backup-all` `{"confirm":"all"}`, or `{"machine":"<agent>","confirm":"<agent>"}` for one agent | write |
 | POST | `/bulk/backup` `{"stacks":["…"]}` | write |

@@ -148,7 +148,10 @@ restic backup <path> --host <stack> \
   taken late in a day can't take that day's daily slot from the nightly.
 - "Latest" (restore, auto-restore, restore test) is the newest regular snapshot. A safety snapshot is used only
   when a stack has nothing else; to roll back a restore, pick it by id.
-- Every restic call uses `--retry-lock 2h`, so backups and forgets wait out a prune instead of failing.
+- Every restic call uses `--retry-lock 2h`, so backups and forgets wait out a prune instead of failing. That
+  includes reads like `snapshots`: restic takes a shared lock for them anyway, and without the flag they fail at
+  once while another agent's forget holds the repository. Only `init`, `cat config`, `unlock` and the
+  browse `ls` (which is killed early and would leave its lock behind) skip it.
 
 ### Stop mode
 

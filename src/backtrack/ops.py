@@ -223,7 +223,7 @@ class Agent:
                                            "data_added": snap.summary.get("data_added")}
                 except Exception as e:  # noqa: BLE001 - one stack failing must not stop the others
                     detail = getattr(e, "tail", "") or getattr(e, "detail", "")
-                    job.log(f"ERROR: {stack.name}: {e}")
+                    job.log(f"ERROR: {stack.name}: {e}" + (f"\n{detail}" if detail else ""))
                     results[stack.name] = {"state": "failed", "error": str(e)}
                     self.notifier.failure(stack.name, "backup", str(e), detail)
         failed = [n for n, r in results.items() if r["state"] != "ok"]

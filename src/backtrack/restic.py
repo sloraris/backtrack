@@ -164,7 +164,9 @@ class Restic:
         args = ["snapshots", "--json"]
         if host:
             args += ["--host", host]
-        data = json.loads(self.run(*args, lock=False) or "[]") or []
+        # restic takes a shared lock for `snapshots` even when asked not to wait, so without --retry-lock this fails
+        # (exit 11) while another machine's forget or prune holds the repository.
+        data = json.loads(self.run(*args) or "[]") or []
         snaps = [
             Snapshot(id=s["id"], short_id=s.get("short_id", s["id"][:8]), time=_parse_time(s["time"]),
                      host=s.get("hostname", ""), paths=s.get("paths", []), tags=s.get("tags") or [],
@@ -257,7 +259,7 @@ class Restic:
 
     def ls_files(self, snapshot: Snapshot) -> tuple[int, int]:
         """(file count, total size) of regular files in the snapshot."""
-        out = self.run("ls", "--json", snapshot.id, lock=False)
+        out = self.run("ls", "--json", snapshot.id)
         count = size = 0
         for line in out.splitlines():
             try:

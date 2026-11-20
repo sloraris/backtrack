@@ -71,6 +71,7 @@ TOASTS = {
     "backup-all": ("success", "Back up all queued", "Each agent backs up its stacks one at a time."),
     "bulk-backup": ("success", "Backups queued", "Each agent backs up its selected stacks one at a time."),
     "bulk-prerestore": ("success", "Removals queued", "Each agent checks every folder again before it deletes."),
+    "untracked": ("success", "Stack untracked", "That agent no longer lists it. Its snapshots stay in the repository."),
     "error": ("error", "That didn't work", ""),
 }
 
@@ -186,12 +187,13 @@ def backup_all(agents: list[dict], csrf: str, machine: str | None = None) -> str
     if machine:
         agents = [a for a in agents if a["machine"] == machine]
     old = [a["machine"] for a in agents if a.get("online") and older_than(a.get("version"), BACKUP_ALL_SINCE)]
-    ready = [a for a in agents if a.get("online") and a.get("stacks") and a["machine"] not in old]
+    ready = [a for a in agents if a.get("online") and a["machine"] not in old
+             and any(s.get("state") != "absent" for s in a.get("stacks", []))]
     if not ready:
         return ""
     rows, total = [], 0
     for a in ready:
-        stacks = sorted(a["stacks"], key=lambda s: s["name"])
+        stacks = sorted((s for s in a["stacks"] if s.get("state") != "absent"), key=lambda s: s["name"])
         total += len(stacks)
         stop = [s["name"] for s in stacks if s.get("mode") == "stop"]
         live = [s["name"] for s in stacks if s.get("mode") != "stop"]
@@ -319,10 +321,14 @@ def stacks_page(agents: list[dict], snapshot_count: int | None, lease: dict | No
     for s, a in stacks:
         last = s.get("last") or {}
         state = status("Misconfigured", "down") if s.get("error") else result_status(last.get("state"))
+        href = f'/stacks/{u(s["name"])}'
+        if s.get("state") == "absent":
+            state = status("Not deployed", "maint") + " " + state
+            href += f'?machine={u(a["machine"])}'
         rows.append(
             f'<tr><td class="bt-table__check"><input type="checkbox" name="stack" value="{e(s["name"])}" form="bt-bulk" '
             f'aria-label="Select {e(s["name"])}"></td>'
-            f'<td><a class="bt-h3 bt-table__link" href="/stacks/{u(s["name"])}">{e(s["name"])}</a></td>'
+            f'<td><a class="bt-h3 bt-table__link" href="{e(href)}">{e(s["name"])}</a></td>'
             f'<td class="bt-code">{e(a["machine"])}</td><td class="bt-muted">{e(s.get("mode") or "–")}</td>'
             f'<td>{e(ago(last.get("time")))}</td><td class="num">{e(size(last.get("data_added")))}</td>'
             f'<td>{state}</td></tr>')
@@ -403,6 +409,12 @@ def stack_page(stack: dict, agent: dict, snapshots: list[dict], csrf: str, folde
                + post_button(f"/stacks/{u(name)}/backup", "Back up now", csrf, "bt-btn bt-btn--primary",
                              fields={"trigger": "manual"}))
     warn = callout("error", "Misconfigured", stack["error"]) if stack.get("error") else ""
+    if stack.get("state") == "absent":
+        seen = f" They were last seen {ago(stack.get('last_seen'))}." if stack.get("last_seen") else ""
+        warn += callout("warning", f"Not deployed on {agent['machine']}",
+                        f"Its containers are gone from this machine.{seen} Back up now saves the folder as it is; "
+                        "nightly runs skip it. Untrack it once it's gone from here for good. Its snapshots stay.")
+        actions = post_button(f"/stacks/{u(name)}/untrack", "Untrack", csrf, fields={"machine": agent["machine"]}) + actions
     keep = ", ".join(f"{v} {k}" for k, v in (stack.get("keep") or {}).items())
     containers = ", ".join(f'{c["service"] or c["name"]} ({c["state"]})' for c in stack.get("containers", []))
     details = (f'<dl class="bt-dl"><dt>Machine</dt><dd class="bt-code">{e(agent["machine"])}</dd>'

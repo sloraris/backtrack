@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from backtrack import __version__, ui
 from backtrack.hub import AgentUnreachable, Hub
 from backtrack.jobs import HISTORY
+from backtrack.ops import OpError
 from backtrack.signing import Verifier
 from backtrack.stacks import NAME_RE
 from backtrack.tokens import TokenStore
@@ -123,6 +124,11 @@ def local_agent_call(service, method: str, path: str, body: dict | None) -> dict
             if not re.fullmatch(r"latest|[0-9a-f]{8,64}", snapshot):
                 raise ApiError(400, "snapshot must be 'latest' or a snapshot id")
             return {"job": service.submit("restore", stack, snapshot=snapshot).to_dict()}
+        if parts[2] == "untrack":
+            try:
+                return service.agent.untrack(stack)
+            except OpError as e:
+                raise ApiError(409, str(e)) from e
     raise ApiError(404, "not found")
 
 
@@ -374,6 +380,14 @@ def make_handler(service, hub: Hub | None):
                             raise ApiError(400, f'set "confirm" to "{stack}" to restore')
                         machine, res = hub.restore(stack, str(data.get("snapshot") or "latest"))
                         return self._json(202, {"machine": machine, **res})
+                    if parts[2] == "untrack":
+                        machine = str(data.get("machine") or "")
+                        if not machine:
+                            raise ApiError(400, 'set "machine" to the agent that should stop listing the stack')
+                        try:
+                            return self._json(200, {"machine": machine, **hub.untrack(stack, machine)})
+                        except LookupError as e:
+                            raise ApiError(404, str(e)) from e
                 except AgentUnreachable as e:
                     raise ApiError(502, str(e)) from e
             raise ApiError(404, "not found")
@@ -449,7 +463,7 @@ def make_handler(service, hub: Hub | None):
                     return render("Stacks", "stacks", ui.stacks_page(hub.agents(), count, lease.to_dict() if lease else None,
                                                                      hub.warnings(), csrf))
                 if len(parts) == 2 and parts[0] == "stacks":
-                    found = hub.find_stack(_stack_name(parts[1]))
+                    found = hub.find_stack(_stack_name(parts[1]), (query.get("machine") or [None])[0])
                     if not found:
                         raise ApiError(404, "no such stack")
                     try:
@@ -530,6 +544,14 @@ def make_handler(service, hub: Hub | None):
                             return self._redirect(f"/stacks/{stack}?done=error&detail=Type+the+stack+name+to+confirm.")
                         machine, res = hub.restore(stack, form.get("snapshot") or "latest")
                         return self._redirect(f"/jobs/{machine}/{res['job']['id']}?done=restore")
+                    if len(parts) == 3 and parts[0] == "stacks" and parts[2] == "untrack":
+                        stack = _stack_name(parts[1])
+                        machine = form.get("machine", "")
+                        try:
+                            hub.untrack(stack, machine)
+                        except LookupError as e:
+                            return self._redirect(f"/stacks/{stack}?done=error&detail={_q(str(e))}")
+                        return self._redirect(f"/?done=untracked&detail={_q(f'{stack} on {machine}')}")
                     if len(parts) == 4 and parts[0] == "stacks" and parts[2:] == ["prerestore", "remove"]:
                         stack = _stack_name(parts[1])
                         if form.get("confirm") != stack:

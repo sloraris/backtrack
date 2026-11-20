@@ -1,3 +1,5 @@
+import shutil
+
 import pytest
 
 from backtrack.ops import OpError
@@ -197,3 +199,34 @@ def test_moved_stack_keeps_series_and_parent(tmp_path, repo):
     assert [s.id for s in b.restic.snapshots("app")] == [first.id, second.id]
     assert second.tag("machine") == "beta"
     assert second.parent == first.id
+
+
+def test_reads_wait_for_another_machines_lock(lab, tmp_path):
+    # A wrapper that behaves like restic while another machine holds an exclusive lock: anything run without
+    # --retry-lock fails with exit 11 instead of waiting.
+    wrapper = tmp_path / "locked-restic"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" --retry-lock "*) ;; *" init "*|*" cat config "*|*" unlock "*) ;;\n'
+        '  *) echo "unable to create lock in backend: repository is already locked exclusively" >&2; exit 11;; esac\n'
+        f'exec "{shutil.which("restic")}" "$@"\n')
+    wrapper.chmod(0o755)
+    lab.restic.binary = str(wrapper)
+    lab.stack_dir("a")
+    lab.docker.add("a", "web", {L_MODE: "live"})
+    result = lab.agent.nightly(lab.job("nightly"))
+    assert result["failed"] == []
+    assert lab.restic.latest("a") is not None
+
+
+def test_nightly_logs_restics_error(lab, monkeypatch):
+    from backtrack.restic import ResticError
+    lab.stack_dir("a")
+    lab.docker.add("a", "web", {L_MODE: "live"})
+
+    def fail(*args, **kwargs):
+        raise ResticError("restic snapshots failed (exit 11)", "Fatal: repository is already locked exclusively")
+    monkeypatch.setattr(lab.restic, "snapshots", fail)
+    job = lab.job("nightly")
+    lab.agent.nightly(job)
+    assert "repository is already locked exclusively" in "\n".join(job.lines)

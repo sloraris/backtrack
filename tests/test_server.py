@@ -57,7 +57,7 @@ def wait_job(lab, job_id, timeout=60):
 
 
 def test_healthz_needs_no_auth(hub):
-    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.4.0"})
+    assert req(hub, "GET", "/healthz") == (200, {"ok": True, "machine": "alpha", "version": "0.4.1"})
 
 
 def test_agent_api_requires_signature(hub):
@@ -480,3 +480,44 @@ def test_bulk_review_pages():
     assert "Remove 1 folder<" in html and 'pattern="remove"' in html
     empty_plan = {"ready": {}, "skipped": [{"stack": "db", "reason": "no set-aside folders"}]}
     assert "<form" not in ui.bulk_page("prerestore-remove", ["db"], empty_plan, agents, [], "tok")
+
+
+def test_hub_prefers_the_agent_where_the_stack_runs():
+    from backtrack.hub import Hub
+
+    fleet = [
+        {"machine": "alpha", "online": True, "stacks": [{"name": "app", "state": "absent"}]},
+        {"machine": "beta", "online": False, "stacks": [{"name": "app", "state": "running"}]},
+        {"machine": "gamma", "online": True, "stacks": [{"name": "app", "state": "running"}]},
+    ]
+    h = Hub.__new__(Hub)
+    h.agents = lambda: fleet
+    assert h.find_stack("app")[1]["machine"] == "gamma"
+    assert h.find_stack("app", "alpha")[1]["machine"] == "alpha"
+    fleet.pop()
+    assert h.find_stack("app")[1]["machine"] == "alpha"  # an online agent that remembers it beats an offline one
+    assert h.find_stack("nope") is None
+
+
+def test_untrack_through_hub_api_and_ui(hub):
+    hub.agent.stacks()
+    write = {"Authorization": "Bearer write-tok"}
+    s, body = req(hub, "POST", "/api/v1/stacks/app/untrack", {"machine": "alpha"}, headers=write)
+    assert s == 404 and "still has containers" in body["error"]
+    assert req(hub, "POST", "/api/v1/stacks/app/untrack", {}, headers=write)[0] == 400
+
+    hub.docker.items = []  # compose down
+    status, stacks = req(hub, "GET", "/api/v1/stacks", headers={"Authorization": "Bearer read-tok"})
+    assert stacks["stacks"][0]["state"] == "absent"
+
+    from backtrack import ui
+    page = ui.stacks_page([{"machine": "alpha", "online": True, "stacks": stacks["stacks"]}], 0, None, [], "c")
+    assert "Not deployed" in page and "/stacks/app?machine=alpha" in page
+    detail = ui.stack_page(stacks["stacks"][0], {"machine": "alpha"}, [], "c")
+    assert "Not deployed on alpha" in detail and "/stacks/app/untrack" in detail
+    assert ui.backup_all([{"machine": "alpha", "online": True, "version": "0.4.1", "stacks": stacks["stacks"]}],
+                         "c") == ""  # nothing to back up there
+
+    s, body = req(hub, "POST", "/api/v1/stacks/app/untrack", {"machine": "alpha"}, headers=write)
+    assert s == 200 and body == {"machine": "alpha", "untracked": "app"}
+    assert hub.agent.find("app") is None

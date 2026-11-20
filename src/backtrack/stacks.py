@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +23,7 @@ STACK_LABELS = (L_MODE, L_PATH, L_KEEP, L_PRE_STOP, L_POST_START, L_POST_RESTORE
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 IGNORE_FILE = ".backupignore"
+KNOWN_FILE = "known-stacks.json"
 
 
 @dataclass
@@ -34,6 +37,8 @@ class Stack:
     post_restore: str | None = None
     containers: list[Container] = field(default_factory=list)
     error: str | None = None
+    labels: dict[str, str] = field(default_factory=dict)  # the backtrack.* label values the settings came from
+    last_seen: float | None = None  # for a remembered stack with no containers: when it last had some
 
     @property
     def state(self) -> str:
@@ -72,7 +77,7 @@ class Stack:
             "keep": self.keep, "state": self.state, "error": self.error,
             "containers": [{"name": c.name, "service": c.service, "state": c.state} for c in self.containers],
             "hooks": {"pre_stop": bool(self.pre_stop), "post_start": bool(self.post_start)},
-            "post_restore": bool(self.post_restore),
+            "post_restore": bool(self.post_restore), "last_seen": self.last_seen,
         }
 
 
@@ -86,33 +91,106 @@ def discover(containers: list[Container], appdata: Path, default_keep: dict[str,
     for name, members in sorted(projects.items()):
         if not any(L_MODE in c.labels for c in members):
             continue
-        stack = Stack(name=name, containers=members)
         values: dict[str, str] = {}
+        disagree = None
         for label in STACK_LABELS:
             found = {c.labels[label] for c in members if label in c.labels}
             if len(found) > 1:
-                stack.error = f"containers disagree on {label}"
+                disagree = f"containers disagree on {label}"
             elif found:
                 values[label] = found.pop()
-        try:
-            if not NAME_RE.match(name):
-                raise ConfigError(f"unsupported project name {name!r}")
-            mode = values.get(L_MODE, "")
-            if mode not in ("stop", "live"):
-                raise ConfigError(f"{L_MODE} must be 'stop' or 'live', not {mode!r}")
-            stack.mode = mode
-            path = Path(values[L_PATH]) if L_PATH in values else appdata / name
-            if not path.is_absolute():
-                raise ConfigError(f"{L_PATH} must be absolute")
-            stack.path = path
-            stack.keep = parse_keep(values[L_KEEP]) if L_KEEP in values else dict(default_keep)
-        except ConfigError as e:
-            stack.error = stack.error or str(e)
-        stack.pre_stop = values.get(L_PRE_STOP) or None
-        stack.post_start = values.get(L_POST_START) or None
-        stack.post_restore = values.get(L_POST_RESTORE) or None
+        stack = build_stack(name, values, members, appdata, default_keep)
+        stack.error = disagree or stack.error
         stacks.append(stack)
     return stacks
+
+
+def build_stack(name: str, values: dict[str, str], containers: list[Container], appdata: Path,
+                default_keep: dict[str, int]) -> Stack:
+    """A Stack from its backtrack.* label values, read from containers or from the remembered copy."""
+    stack = Stack(name=name, containers=containers, labels=dict(values))
+    try:
+        if not NAME_RE.match(name):
+            raise ConfigError(f"unsupported project name {name!r}")
+        mode = values.get(L_MODE, "")
+        if mode not in ("stop", "live"):
+            raise ConfigError(f"{L_MODE} must be 'stop' or 'live', not {mode!r}")
+        stack.mode = mode
+        path = Path(values[L_PATH]) if L_PATH in values else appdata / name
+        if not path.is_absolute():
+            raise ConfigError(f"{L_PATH} must be absolute")
+        stack.path = path
+        stack.keep = parse_keep(values[L_KEEP]) if L_KEEP in values else dict(default_keep)
+    except ConfigError as e:
+        stack.error = str(e)
+    stack.pre_stop = values.get(L_PRE_STOP) or None
+    stack.post_start = values.get(L_POST_START) or None
+    stack.post_restore = values.get(L_POST_RESTORE) or None
+    return stack
+
+
+class KnownStacks:
+    """Stacks this agent has seen, kept in the state folder.
+
+    `docker compose down` removes a stack's containers and with them the labels discovery reads. Remembering each
+    stack's labels keeps it listed, as `absent`, so it can still be backed up by hand (before a move, or while it
+    is down for maintenance) until someone untracks it.
+    """
+
+    REFRESH = 3600  # rewrite an unchanged entry at most this often, to keep last_seen roughly current
+
+    def __init__(self, state_dir: Path):
+        self.path = state_dir / KNOWN_FILE
+        self._lock = threading.Lock()
+
+    def load(self) -> dict[str, dict]:
+        try:
+            data = json.loads(self.path.read_text())
+        except (FileNotFoundError, ValueError, OSError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if NAME_RE.match(k) and isinstance(v, dict)
+                and isinstance(v.get("labels"), dict)}
+
+    def _save(self, data: dict[str, dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
+        os.replace(tmp, self.path)
+
+    def update(self, present: list[Stack], projects: set[str], now: float) -> dict[str, dict]:
+        """Record the stacks that have containers; drop projects that still run but lost their mode label.
+
+        A stack with a configuration error is not recorded, so a broken label never replaces a good copy.
+        Returns the remembered stacks.
+        """
+        with self._lock:
+            data = self.load()
+            changed = False
+            for s in present:
+                if s.error or not s.containers:
+                    continue
+                old = data.get(s.name)
+                if not old or old["labels"] != s.labels or now - float(old.get("last_seen", 0)) > self.REFRESH:
+                    data[s.name] = {"labels": s.labels, "last_seen": now}
+                    changed = True
+            labelled = {s.name for s in present}
+            for name in [n for n in data if n in projects and n not in labelled]:
+                del data[name]  # its containers are here without backtrack.mode: opted out, not gone
+                changed = True
+            if changed:
+                self._save(data)
+            return data
+
+    def forget(self, name: str) -> bool:
+        with self._lock:
+            data = self.load()
+            if name not in data:
+                return False
+            del data[name]
+            self._save(data)
+            return True
 
 
 def has_files(path: Path) -> bool:

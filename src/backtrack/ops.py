@@ -18,8 +18,8 @@ from backtrack.notify import Notifier, call_hooks
 from backtrack.prerestore import Aside, Registry, Verdict, folder_size, is_aside_of, judge, parse_duration
 from backtrack.restic import Restic, ResticError, Snapshot
 from backtrack.share import Share
-from backtrack.stacks import (IGNORE_FILE, NAME_RE, Stack, discover, has_files, literal_ignores, literal_matches,
-                              restic_excludes)
+from backtrack.stacks import (IGNORE_FILE, NAME_RE, KnownStacks, Stack, build_stack, discover, has_files,
+                              literal_ignores, literal_matches, restic_excludes)
 
 
 class OpError(Exception):
@@ -36,11 +36,25 @@ class Agent:
         self.share = share
         self.notifier = notifier
         self.asides = Registry(cfg.state_dir)
+        self.known = KnownStacks(cfg.state_dir)
         self.clock = time.time
 
     # -- discovery ------------------------------------------------------------------------------------------
     def stacks(self) -> list[Stack]:
-        return discover(self.docker.containers(), self.cfg.appdata, self.cfg.keep)
+        """Stacks with containers here, plus remembered ones whose containers are gone (state `absent`)."""
+        containers = self.docker.containers()
+        stacks = discover(containers, self.cfg.appdata, self.cfg.keep)
+        try:
+            known = self.known.update(stacks, {c.project for c in containers}, self.clock())
+        except OSError:
+            known = self.known.load()  # a read-only or full state folder must not hide the running stacks
+        present = {s.name for s in stacks}
+        for name, entry in known.items():
+            if name not in present:
+                stack = build_stack(name, entry["labels"], [], self.cfg.appdata, self.cfg.keep)
+                stack.last_seen = entry.get("last_seen")
+                stacks.append(stack)
+        return sorted(stacks, key=lambda s: s.name)
 
     def find(self, name: str) -> Stack | None:
         for s in self.stacks():
@@ -51,7 +65,8 @@ class Agent:
     def _require(self, name: str) -> Stack:
         stack = self.find(name)
         if stack is None:
-            raise OpError(f"no stack {name!r} with a backtrack.mode label on {self.cfg.machine}")
+            raise OpError(f"no stack {name!r} with a backtrack.mode label on {self.cfg.machine}; to back up a folder "
+                          "this agent has never seen, pass its path")
         if stack.error:
             raise OpError(f"{name}: {stack.error}")
         return stack
@@ -127,6 +142,12 @@ class Agent:
         assert stack.path is not None
         if not has_files(stack.path):
             raise OpError(f"{stack.path} is missing or empty; refusing to save an empty snapshot")
+        if stack.state == "absent":
+            elsewhere = self.share.running_elsewhere(stack.name)
+            if elsewhere:
+                raise OpError(f"{stack.name} has no containers here but is running on {', '.join(elsewhere)}; a "
+                              "snapshot of this copy would become its latest. Back it up there, or untrack it here.")
+            job.log(f"{stack.name} has no containers here; backing up {stack.path} as it is")
         with self._stopped(stack, job, trigger) as state:
             snap = self._snapshot_folder(stack.name, stack.path, trigger, job)
             state["snapshot"], state["ok"] = snap.id, True
@@ -139,11 +160,23 @@ class Agent:
             self.notifier.failure(stack.name, "forget", str(e), e.tail)
         return snap
 
-    def backup(self, name: str, job: Job, trigger: str = "manual") -> dict:
+    def backup(self, name: str, job: Job, trigger: str = "manual", path: Path | None = None) -> dict:
+        """Back up one stack. `path` backs up a folder for a stack this agent has never seen (no containers, not
+        remembered); a stack it knows always uses its own folder."""
         if trigger not in ("manual", "pre-migrate", "nightly"):
             raise OpError(f"unknown trigger {trigger!r}")
         with exclusive(self.cfg.state_dir, job):
-            stack = self._require(name)
+            stack = self.find(name) if path is not None else None
+            if stack is None and path is not None:
+                if not NAME_RE.match(name):
+                    raise OpError(f"invalid stack name {name!r}")
+                if not path.is_absolute():
+                    raise OpError("the path must be absolute")
+                stack = Stack(name=name, mode="live", path=path)
+            else:
+                stack = self._require(name)
+                if path is not None and stack.path != path:
+                    raise OpError(f"{name} keeps its data in {stack.path}; leave out the path")
             try:
                 snap = self._backup_stack(stack, trigger, job)
             except (OpError, ResticError, DockerError) as e:
@@ -170,7 +203,14 @@ class Agent:
         results: dict[str, dict] = {}
         with exclusive(self.cfg.state_dir, job):
             stacks = self.stacks()
-            if only is not None:
+            if only is None:
+                # Nothing runs, so nothing changed since it was last backed up; and after a move this folder is
+                # the old copy, which must not become the latest snapshot. Named backups still take it.
+                absent = [s.name for s in stacks if s.state == "absent"]
+                if absent:
+                    job.log(f"skipping {', '.join(absent)}: no containers here")
+                stacks = [s for s in stacks if s.state != "absent"]
+            else:
                 stacks = [s for s in stacks if s.name in only]
                 for name in sorted(set(only) - {s.name for s in stacks}):
                     job.log(f"ERROR: {name}: no such stack on {self.cfg.machine}")
@@ -183,7 +223,7 @@ class Agent:
                                            "data_added": snap.summary.get("data_added")}
                 except Exception as e:  # noqa: BLE001 - one stack failing must not stop the others
                     detail = getattr(e, "tail", "") or getattr(e, "detail", "")
-                    job.log(f"ERROR: {stack.name}: {e}")
+                    job.log(f"ERROR: {stack.name}: {e}" + (f"\n{detail}" if detail else ""))
                     results[stack.name] = {"state": "failed", "error": str(e)}
                     self.notifier.failure(stack.name, "backup", str(e), detail)
         failed = [n for n, r in results.items() if r["state"] != "ok"]
@@ -541,6 +581,17 @@ class Agent:
             job.log(f"forgetting {len(ids)} snapshots of {name}")
             self.restic.forget_ids(ids)
         return {"forgotten": len(ids)}
+
+    def untrack(self, name: str) -> dict:
+        """Forget a remembered stack whose containers are gone from this machine. Its snapshots stay."""
+        stack = self.find(name)
+        if stack is None:
+            raise OpError(f"{name} isn't tracked on {self.cfg.machine}")
+        if stack.containers:
+            raise OpError(f"{name} still has containers on {self.cfg.machine}; remove them (docker compose down) "
+                          "or its backtrack.mode label first")
+        self.known.forget(name)
+        return {"untracked": name}
 
     # -- presence -------------------------------------------------------------------------------------------
     def presence(self, current: Job | None = None, last: dict | None = None,
